@@ -173,6 +173,8 @@ pip install -r requirements.txt
    cp config.json.example config.json    # Linux / macOS
    ```
    如需自定义 Web 端口，可在 `config.json` 中填写 `"port": 9988` 等数值，或通过环境变量 `WEB_SIGNIN_PORT` 覆盖。
+   如需使用管理员后台，请填写 `admin_password`，`admin_username` 默认为 `admin`。
+   也可使用环境变量 `ADMIN_PASSWORD` / `ADMIN_USERNAME`，环境变量优先。
 3. 启动 Web 服务：
    ```bash
    python web_signin/run.py
@@ -183,16 +185,60 @@ pip install -r requirements.txt
    ```
    若修改了端口，请将 `9988` 替换为实际端口。
 
+### 管理员登录与运行状态
+
+用户配置页右上角的「管理员登录」进入 `/admin`，原 `/manage` 地址也可使用。
+首次使用时，在 `web_signin/config.json` 中设置自己的管理员密码，例如：
+
+```json
+{
+  "port": 9988,
+  "admin_username": "admin",
+  "admin_password": "请替换为自己的长密码"
+}
+```
+
+保存后重启 Web 服务，使用配置的账号和密码登录。`config.json` 已加入 Git 忽略列表。
+没有配置密码时，后台禁止访问任务数据；不提供默认密码，也不能通过公开的 `/api/admin/init` 抢先创建管理员。
+密码以带盐哈希保存到数据库。修改配置密码后重启即可更新；已有管理员 Key 仍可登录，并在登录成功后升级旧哈希。
+
+登录后可以：
+
+- 查看所有签到任务的姓名、班级、坐标、每日执行时间和生效日期。
+- 查看「正在执行」「等待调度」「尚未生效」「已到期」「已禁用」等状态，以及下次执行时间和最近签到结果。
+- 按姓名、班级、启用状态和执行状态筛选任务，选中任务查看最近 50 条执行日志。
+- 修改配置、启用或禁用任务，以及删除任务和日志。修改时间或日期后调度立即更新。
+
+页面每 10 秒刷新运行状态和所选任务日志，时间按北京时间显示。
+「正在执行」指本 Web 服务正在调用签到流程；「等待调度」指任务已注册，等待下一次定时执行。
+后台仅统计 Web 服务数据库中的任务，独立运行 `BJMF.py` 的任务不在此列表内。
+禁用任务会停止后续调度，已经开始的执行会继续完成。
+
+管理员 token 保存在当前浏览器标签页的会话存储中，24 小时过期；退出会立即撤销 token。
+管理接口需要 `X-Admin-Token` 请求头，普通用户只能凭自己的扫码会话读取任务和日志。
+Cookie 不会返回到浏览器。管理员登录及实时执行状态沿用单进程内存管理，重启后需重新登录；部署时使用单个 Web 进程。
+
+验证管理员功能（在项目根目录执行）：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+测试使用临时数据库和模拟签到，不调用真实签到或通知接口。
+
 ### 使用 Docker 运行
 
 项目内已提供 `web_signin/Dockerfile`，可用于快速构建和运行 Web 版：
 
 ```bash
 docker build -t bjmf-web -f web_signin/Dockerfile .
-docker run -d --name bjmf-web -p 9988:9988 bjmf-web
+docker run -d --name bjmf-web -p 9988:9988 -e ADMIN_PASSWORD="请替换为自己的长密码" -v ./web_signin/db:/app/web_signin/db bjmf-web
 ```
 
 如需调整端口，可修改映射 `-p 宿主端口:容器端口`，或通过环境变量 `WEB_SIGNIN_PORT` 覆盖容器内部端口。
+
+使用 `docker compose up -d --build` 时，可在根目录 `.env` 中配置 `ADMIN_USERNAME=admin` 和 `ADMIN_PASSWORD=自己的长密码`。
+Compose 会传入管理员配置并持久化数据库；用户扫码创建的任务和管理员密码哈希在重建容器后保留。
 
 ## 注意事项
 

@@ -1,4 +1,5 @@
 /data.json
+/web_signin/config.json
 __pycache__/
 *.pyc
 /.env

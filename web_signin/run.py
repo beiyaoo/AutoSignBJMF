@@ -1,5 +1,10 @@
 import json
 import os
+import sys
+from pathlib import Path
+
+# Direct script startup also needs the repository's shared utils modules.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import create_app
 
