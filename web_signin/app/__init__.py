@@ -1,14 +1,15 @@
 from flask import Flask, jsonify, request, send_from_directory
 from apscheduler.schedulers.background import BackgroundScheduler
 import secrets
-import time
-import hashlib
 from datetime import datetime, timedelta
+from sqlalchemy import func
 
+from .admin import init_admin, require_admin as _require_admin
 from .db import init_db
-from .scheduler import register_existing_tasks, register_task_jobs, unregister_task_jobs
-from .models import Task, TaskLog, Setting
+from .scheduler import register_existing_tasks, register_task_jobs, unregister_task_jobs, task_schedule_state, _parse_times
+from .models import Task, TaskLog
 from .qr_login import QRLoginService
+from .runtime import TaskRuntime
 import json
 import os
 import re
@@ -33,20 +34,20 @@ def _parse_coord_string(coord: str):
 
 
 def create_app():
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder="../static")
 
     # 初始化数据库
     engine, SessionLocal = init_db()
     app.config["DB_ENGINE"] = engine
     app.config["DB_SESSION_FACTORY"] = SessionLocal
 
+    init_admin(app)
+    app.config["TASK_RUNTIME"] = TaskRuntime()
+
     # 初始化 APScheduler（后台调度器）
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     scheduler.start()
     app.config["SCHEDULER"] = scheduler
-
-    # 简单的内存态管理员 token 管理（仅单进程场景）
-    app.config["ADMIN_TOKENS"] = {}  # {token: expire_at_utc}
 
     # 启动时加载已启用任务到调度器
     register_existing_tasks(app)
@@ -62,6 +63,7 @@ def create_app():
         return send_from_directory(static_dir, "index.html")
 
     # 后台管理页面（仅提供静态 HTML，实际权限控制在 /api/admin/* 接口中完成）
+    @app.get("/admin")
     @app.get("/manage")
     def manage_page():
         static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
@@ -177,6 +179,13 @@ def create_app():
         if not lat or not lng or not isinstance(times, list) or not times:
             return jsonify({"error": "经纬度(coord/lat,lng) 与 times 为必填"}), 400
 
+        normalized = _parse_times(json.dumps(times))
+        if not normalized or len(normalized) != len(times):
+            return jsonify({"error": "请输入有效的签到时间（HH:MM 或 HH:MM:SS）"}), 400
+        times = list(dict.fromkeys(normalized))
+        if date_start and date_end and date_start > date_end:
+            return jsonify({"error": "开始日期不能晚于结束日期"}), 400
+
         SessionLocal = app.config["DB_SESSION_FACTORY"]
         with SessionLocal() as db:
             task = Task(
@@ -231,6 +240,10 @@ def create_app():
             if not task:
                 return jsonify({"error": "not found"}), 404
 
+            error = _require_task_access(task)
+            if error:
+                return error
+
             return jsonify(
                 {
                     "id": task.id,
@@ -272,6 +285,10 @@ def create_app():
             task = db.query(Task).filter(Task.id == task_id).first()
             if not task:
                 return jsonify({"error": "not found"}), 404
+
+            error = _require_task_access(task)
+            if error:
+                return error
 
             logs = (
                 db.query(TaskLog)
@@ -424,88 +441,16 @@ def create_app():
 
     # ========== 阶段五：管理员后台与运维接口（后端部分） ==========
 
-    def _hash_admin_key(key: str) -> str:
-        """
-        对管理员 Key 做简单哈希存储，避免明文落库。
-        """
-        return hashlib.sha256(key.encode("utf-8")).hexdigest()
-
-    def _get_admin_key_hash(db):
-        setting = db.query(Setting).filter(Setting.key == "admin_key_hash").first()
-        return setting.value if setting else None
-
-    def _require_admin(app):
-        """
-        管理员认证校验。
-
-        当前部署需求：后台无需密码即可查看与管理所有任务，
-        因此此函数直接放行，不再强制要求 admin token。
-
-        如需重新开启鉴权，可恢复为从请求头 `X-Admin-Token` /
-        查询参数 `admin_token` 中读取 token 并校验有效期。
-        """
-        return "public", None
-
-    @app.post("/api/admin/init")
-    def api_admin_init():
-        """
-        初始化管理员 Key：
-        - 仅当数据库中不存在 admin_key_hash 时允许调用；
-        - Body: { "key": "你的管理员密码" }。
-        """
-        SessionLocal = app.config["DB_SESSION_FACTORY"]
-        data = request.get_json(silent=True) or {}
-        key = (data.get("key") or "").strip()
-        if not key:
-            return jsonify({"error": "missing key"}), 400
-
-        with SessionLocal() as db:
-            existing_hash = _get_admin_key_hash(db)
-            if existing_hash:
-                return jsonify({"error": "admin key already initialized"}), 409
-
-            setting = Setting(
-                key="admin_key_hash",
-                value=_hash_admin_key(key),
-            )
-            db.add(setting)
-            db.commit()
-
-        return jsonify({"status": "ok"})
-
-    @app.post("/api/admin/login")
-    def api_admin_login():
-        """
-        管理员登录：提交管理员 Key，返回一个短期 admin token。
-
-        Body:
-        - key: 管理员密码
-
-        响应:
-        - token: 管理员访问 token
-        - expires_in: 过期时间（秒），默认 24 小时
-        """
-        SessionLocal = app.config["DB_SESSION_FACTORY"]
-        data = request.get_json(silent=True) or {}
-        key = (data.get("key") or "").strip()
-        if not key:
-            return jsonify({"error": "missing key"}), 400
-
-        with SessionLocal() as db:
-            key_hash = _get_admin_key_hash(db)
-            if not key_hash:
-                return jsonify({"error": "admin key not initialized"}), 400
-
-            if _hash_admin_key(key) != key_hash:
-                return jsonify({"error": "invalid admin key"}), 401
-
-        # 生成 admin token，默认有效期 24 小时
-        token = secrets.token_urlsafe(24)
-        expires_in = 24 * 3600
-        expire_at = datetime.utcnow() + timedelta(seconds=expires_in)
-        app.config["ADMIN_TOKENS"][token] = expire_at
-
-        return jsonify({"token": token, "expires_in": expires_in})
+    def _require_task_access(task):
+        if request.headers.get("X-Admin-Token"):
+            _, error = _require_admin(app)
+            return error
+        state = qr_service.get_session_state(request.args.get("token", ""))
+        if not state or not state.cookie:
+            return jsonify({"error": "请先扫码登录"}), 401
+        if state.cookie != task.cookie:
+            return jsonify({"error": "无权访问其他用户的任务"}), 403
+        return None
 
     @app.get("/api/admin/tasks")
     def api_admin_list_tasks():
@@ -539,6 +484,16 @@ def create_app():
                 query = query.filter(Task.enabled.is_(flag))
 
             tasks = query.order_by(Task.id.desc()).all()
+            latest_ids = (
+                db.query(TaskLog.task_id, func.max(TaskLog.id).label("log_id"))
+                .group_by(TaskLog.task_id).subquery()
+            )
+            latest_logs = {
+                log.task_id: log
+                for log in db.query(TaskLog).join(latest_ids, TaskLog.id == latest_ids.c.log_id).all()
+            }
+            jobs = app.config["SCHEDULER"].get_jobs()
+            active_runs = app.config["TASK_RUNTIME"].snapshot()
 
             return jsonify(
                 [
@@ -557,6 +512,11 @@ def create_app():
                         "date_end": t.date_end.isoformat() if t.date_end else None,
                         "created_at": t.created_at.isoformat() if t.created_at else None,
                         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+                        **task_schedule_state(app, t, jobs=jobs, active_runs=active_runs),
+                        "latest_run": {
+                            "run_at": latest_logs[t.id].run_at.isoformat() + "Z",
+                            "status": latest_logs[t.id].status,
+                        } if t.id in latest_logs else None,
                     }
                     for t in tasks
                 ]
@@ -587,10 +547,6 @@ def create_app():
             if not task:
                 return jsonify({"error": "not found"}), 404
 
-            # 记录更新前后 enabled / times 是否有变化，用于刷新调度
-            old_enabled = bool(task.enabled)
-            old_times = json.loads(task.times or "[]")
-
             if "lat" in data:
                 task.lat = str(data.get("lat") or task.lat)
             if "lng" in data:
@@ -605,8 +561,14 @@ def create_app():
                 times = data.get("times") or []
                 if not isinstance(times, list):
                     return jsonify({"error": "times must be a list"}), 400
+                normalized = _parse_times(json.dumps(times))
+                if not normalized or len(normalized) != len(times):
+                    return jsonify({"error": "请输入有效的签到时间（HH:MM 或 HH:MM:SS）"}), 400
+                times = list(dict.fromkeys(normalized))
                 task.times = json.dumps(times, ensure_ascii=False)
             if "enabled" in data:
+                if not isinstance(data["enabled"], bool):
+                    return jsonify({"error": "enabled must be a boolean"}), 400
                 task.enabled = bool(data.get("enabled"))
             # 日期范围更新：允许传入 YYYY-MM-DD 字符串或 null/空字符串
             raw_date_start = data.get("date_start", "__missing__")
@@ -627,10 +589,13 @@ def create_app():
             except ValueError:
                 return jsonify({"error": "日期格式错误，应为 YYYY-MM-DD"}), 400
 
+            if task.date_start and task.date_end and task.date_start > task.date_end:
+                return jsonify({"error": "开始日期不能晚于结束日期"}), 400
+
             db.commit()
             db.refresh(task)
 
-            # 根据 enabled/times 的变化动态更新 APScheduler job
+            # 重建调度，同时移除旧时间点并应用日期范围变化。
             new_enabled = bool(task.enabled)
             new_times = json.loads(task.times or "[]")
 
@@ -638,9 +603,7 @@ def create_app():
                 # 禁用任务：移除所有 job
                 unregister_task_jobs(app, task.id)
             else:
-                # 启用或时间列表发生变化：重建 job
-                if (not old_enabled and new_enabled) or old_times != new_times:
-                    register_task_jobs(app, task)
+                register_task_jobs(app, task)
 
             return jsonify(
                 {

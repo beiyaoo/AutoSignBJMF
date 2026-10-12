@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import json
+import pytz
 
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete
@@ -49,16 +50,11 @@ def register_task_jobs(app, task: Task):
     为单个 Task 注册所有时间点的 APScheduler 任务。
     """
     scheduler = app.config["SCHEDULER"]
+    unregister_task_jobs(app, task.id)
     times = _parse_times(task.times)
     for t in times:
         hour, minute, second = t.split(":")
         job_id = _job_id_for(task.id, t)
-        # 先移除可能已存在的 job
-        try:
-            scheduler.remove_job(job_id)
-        except Exception:
-            pass
-
         # 组装可选的生效时间范围
         start_date = task.date_start
         end_date = task.date_end
@@ -75,7 +71,7 @@ def register_task_jobs(app, task: Task):
             func=run_task_job,
             trigger=trigger,
             id=job_id,
-            args=[task.id],
+            args=[task.id, app],
             replace_existing=True,
         )
 
@@ -117,23 +113,64 @@ def cleanup_old_logs(db):
     db.commit()
 
 
-def run_task_job(task_id: int):
+def task_schedule_state(app, task, jobs=None, active_runs=None):
+    """Report actual execution separately from a task's configured schedule."""
+    if jobs is None:
+        jobs = app.config["SCHEDULER"].get_jobs()
+    if active_runs is None:
+        active_runs = app.config["TASK_RUNTIME"].snapshot()
+    next_runs = [
+        job.next_run_time for job in jobs
+        if job.id.startswith(f"task_{task.id}_") and job.next_run_time
+    ]
+    local_now = datetime.now(pytz.timezone("Asia/Shanghai")).replace(tzinfo=None)
+    running = active_runs.get(task.id, {})
+    if running:
+        state = "running"
+    elif not task.enabled:
+        state = "disabled"
+    elif task.date_end and local_now > task.date_end:
+        state = "expired"
+    elif task.date_start and local_now < task.date_start:
+        state = "pending"
+    elif next_runs:
+        state = "scheduled"
+    else:
+        state = "unscheduled"
+    return {
+        "runtime_status": state,
+        "next_run_at": min(next_runs).isoformat() if next_runs else None,
+        "running_since": running.get("running_since"),
+        "running_count": running.get("running_count", 0),
+    }
+
+
+def run_task_job(task_id: int, app):
+    runtime = app.config["TASK_RUNTIME"]
+    run_id = runtime.start(task_id)
+    try:
+        _execute_task_job(task_id, app.config["DB_SESSION_FACTORY"])
+    finally:
+        runtime.finish(task_id, run_id)
+
+
+def _execute_task_job(task_id: int, SessionLocal):
     """
     真正执行签到任务的函数。
     """
-    # 为了避免循环依赖，这里在函数内部导入 create_app 使用的会话工厂
-    from .db import get_engine, get_session_factory
     from utils.attendance import Task as AttendanceTask
     from utils.notification import sendQQmessage, wx_send
-
-    engine = get_engine()
-    SessionLocal = get_session_factory(engine)
 
     now = datetime.utcnow()
 
     with SessionLocal() as db:
         task = db.query(Task).filter(Task.id == task_id).first()
-        if not task:
+        if not task or not task.enabled:
+            return
+        local_now = datetime.now(pytz.timezone("Asia/Shanghai")).replace(tzinfo=None)
+        if task.date_start and local_now < task.date_start:
+            return
+        if task.date_end and local_now > task.date_end:
             return
 
         # 组装与原有 CLI 脚本兼容的 student 配置，复用旧的签到逻辑
@@ -150,7 +187,11 @@ def run_task_job(task_id: int):
         }
 
         # 调用旧的签到实现
-        user_name, result_status = AttendanceTask(student)
+        try:
+            user_name, result_status = AttendanceTask(student)
+        except Exception:
+            # Unexpected failures must still leave an error log and clear running state.
+            user_name, result_status = task.name, "error"
 
         # 根据结果映射为可读中文说明
         status_map = {
