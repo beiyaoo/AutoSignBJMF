@@ -18,10 +18,10 @@ class TaskRuntime:
         with self._lock:
             return self._task_locks.setdefault(task_id, threading.RLock())
 
-    def start(self, task_id):
+    def start(self, task_id, job_id=None):
         run_id = secrets.token_hex(8)
         with self._lock:
-            self._runs.setdefault(task_id, {})[run_id] = datetime.utcnow()
+            self._runs.setdefault(task_id, {})[run_id] = (datetime.utcnow(), job_id)
         return run_id
 
     def finish(self, task_id, run_id):
@@ -34,6 +34,10 @@ class TaskRuntime:
     def snapshot(self):
         with self._lock:
             return {
-                task_id: {"running_since": min(runs.values()).isoformat() + "Z", "running_count": len(runs)}
+                task_id: {
+                    "running_since": min(started for started, _ in runs.values()).isoformat() + "Z",
+                    "running_count": len(runs),
+                    "job_ids": [job_id for _, job_id in runs.values() if job_id is not None],
+                }
                 for task_id, runs in self._runs.items()
             }

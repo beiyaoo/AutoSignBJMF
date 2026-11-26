@@ -7,7 +7,7 @@ from sqlalchemy import delete
 
 from .models import Task, TaskLog, TaskDay, TaskNotice
 from .schedule_policy import parse_times as _parse_times
-from .daily_schedule import register_random_jobs, execute_random_attempt, dispatch_pending_notices
+from .daily_schedule import register_random_jobs, execute_random_attempt, dispatch_pending_notices, random_job_id
 
 
 def _job_id_for(task_id: int, time_str: str) -> str:
@@ -133,7 +133,8 @@ def task_schedule_state(app, task, jobs=None, active_runs=None):
 def run_task_job(task_id: int, app, kind="fixed", day=None, slot=None, signature=None):
     runtime = app.config["TASK_RUNTIME"]
     with runtime.task_lock(task_id):
-        run_id = runtime.start(task_id)
+        job_id = random_job_id(task_id, day, kind, slot) if kind != "fixed" else None
+        run_id = runtime.start(task_id, job_id)
         try:
             if kind == "fixed":
                 _execute_task_job(task_id, app.config["DB_SESSION_FACTORY"])

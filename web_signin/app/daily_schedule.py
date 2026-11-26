@@ -76,10 +76,12 @@ def _make_plan(task, day):
     return result
 
 
-def _ensure_day(db, task, day):
+def _ensure_day(db, task, day, now):
     date_key = day.isoformat()
     state = db.query(TaskDay).filter_by(task_id=task.id, local_day=date_key).first()
     signature = schedule_signature(task)
+    if state and state.signature == signature:
+        return state
     if not state:
         start = ZONE.localize(datetime.combine(day, datetime.min.time())).astimezone(pytz.utc).replace(tzinfo=None)
         existing_success = not task.periods and db.query(TaskLog.id).filter(
@@ -87,12 +89,20 @@ def _ensure_day(db, task, day):
             TaskLog.run_at >= start, TaskLog.run_at < start + timedelta(days=1),
         ).first() is not None
         state = TaskDay(task_id=task.id, local_day=date_key, signature=signature,
-                        plan=json.dumps(_make_plan(task, day)), completed_slots="[]", succeeded=existing_success)
+                        plan="[]", completed_slots="[]", succeeded=existing_success)
         db.add(state)
-        db.flush()
-    elif state.signature != signature:
-        state.signature = signature
-        state.plan = json.dumps(_make_plan(task, day))
+    plan = _make_plan(task, day)
+    if task.periods and day == now.date():
+        previous_slots = {_slot_key(entry) for entry in json.loads(state.plan)}
+        completed = set(json.loads(state.completed_slots))
+        # Catch-up is for downtime on an existing schedule, not for newly added past periods.
+        for entry in plan:
+            key = _slot_key(entry)
+            if entry["kind"] == "fallback" and key not in previous_slots and datetime.fromisoformat(entry["run_at"]) < now:
+                completed.add(key)
+        state.completed_slots = json.dumps(sorted(completed))
+    state.signature = signature
+    state.plan = json.dumps(plan)
     return state
 
 
@@ -105,8 +115,8 @@ def _progress(state, period=None):
             "fallback_done": state.fallback_done}
 
 
-def _job_id(task_id, local_day, entry):
-    return f"task_{task_id}_{local_day.replace('-', '')}_{entry['kind']}_{entry['slot'].replace(':', '')}"
+def random_job_id(task_id, local_day, kind, slot):
+    return f"task_{task_id}_{local_day.replace('-', '')}_{kind}_{slot.replace(':', '')}"
 
 
 def _slot_key(entry):
@@ -126,7 +136,7 @@ def register_random_jobs(app, task):
         for day in [first_day, first_day + timedelta(days=1)]:
             if not _day_active(task, day):
                 continue
-            state = _ensure_day(db, task, day)
+            state = _ensure_day(db, task, day, now)
             completed = set(json.loads(state.completed_slots))
             for entry in json.loads(state.plan):
                 progress = _progress(state, entry.get("period"))
@@ -145,7 +155,8 @@ def register_random_jobs(app, task):
         db.commit()
 
     for entry, run_at, day, signature in plans:
-        scheduler.add_job(run_task_job, DateTrigger(run_date=run_at), id=_job_id(task.id, day, entry),
+        scheduler.add_job(run_task_job, DateTrigger(run_date=run_at),
+                          id=random_job_id(task.id, day, entry["kind"], entry["slot"]),
                           args=[task.id, app, entry["kind"], day, entry["slot"], signature],
                           replace_existing=True, misfire_grace_time=None)
     scheduler.add_job(refresh_daily_jobs, CronTrigger(hour=0, minute=0, second=0,
@@ -170,12 +181,51 @@ def _progress_summary(progress):
     }
 
 
-def day_summary(state, periods=()):
+def day_summary(task, state, scheduled_runs, active_run, now):
+    periods = task.periods or []
+    plan = json.loads(state.plan) if state else []
+    entries_by_period = {}
+    if periods and state:
+        for entry in plan:
+            entries_by_period.setdefault(entry.get("period"), []).append(entry)
+    completed = set(json.loads(state.completed_slots)) if periods and state else set()
+    active_ids = set(active_run.get("job_ids", ()))
+    today_periods = []
+    for period in periods:
+        name = period["name"]
+        progress = _progress_summary(_progress(state, name))
+        next_runs = []
+        active = False
+        fallback_at = None
+        for entry in entries_by_period.get(name, ()):
+            job_id = random_job_id(task.id, state.local_day, entry["kind"], entry["slot"])
+            if entry["kind"] == "fallback":
+                fallback_at = datetime.fromisoformat(entry["run_at"])
+            if job_id in active_ids:
+                active = True
+            elif job_id in scheduled_runs and _slot_key(entry) not in completed:
+                next_runs.append(scheduled_runs[job_id])
+
+        next_run_at = None
+        if progress["today_succeeded"]:
+            status = "success"
+        elif active:
+            status = "running"
+        elif progress["today_fallback_done"]:
+            status = "failed"
+        elif task.enabled and next_runs:
+            status = "scheduled"
+            next_run_at = min(next_runs).isoformat()
+        elif task.enabled and fallback_at and fallback_at <= now:
+            status = "missed"
+        else:
+            status = "unscheduled"
+        today_periods.append({"name": name, **progress, "status": status, "next_run_at": next_run_at})
+
     return {
         **_progress_summary(_progress(state) if not periods else {}),
-        "today_plan": json.loads(state.plan) if state else [],
-        "today_periods": [{"name": period["name"], **_progress_summary(_progress(state, period["name"]))}
-                          for period in periods],
+        "today_plan": plan,
+        "today_periods": today_periods,
     }
 
 
@@ -266,7 +316,7 @@ def execute_random_attempt(task_id, app, kind, day, slot, signature):
             for planned in entries:
                 if planned.get("period") == period:
                     try:
-                        app.config["SCHEDULER"].remove_job(_job_id(task_id, day, planned))
+                        app.config["SCHEDULER"].remove_job(random_job_id(task_id, day, planned["kind"], planned["slot"]))
                     except JobLookupError:
                         pass
 

@@ -13,7 +13,14 @@ const runtimeLabels = {
   running: "正在执行", scheduled: "等待调度", pending: "尚未生效",
   expired: "已到期", disabled: "已禁用", unscheduled: "未注册调度"
 };
+const periodStatusLabels = {
+  success: "已签到", running: "执行中", scheduled: "待执行",
+  failed: "兜底失败", missed: "已错过", unscheduled: "未调度"
+};
 const logLabels = { success: "签到成功", error: "执行出错", skipped: "已跳过" };
+const beijingClock = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit"
+});
 let signedIn = false;
 let sessionVersion = 0;
 let refreshTimer = null;
@@ -103,11 +110,64 @@ function addDetail(cell, value) {
   cell.appendChild(detail);
 }
 
-function describePeriod(period, state) {
-  if (!state) return `${period.name}：今日暂无计划`;
-  if (state.today_succeeded) return `${period.name}：已签到，跳过时段内剩余尝试`;
-  if (state.today_fallback_done) return `${period.name}：兜底签到结束，尚未签到`;
-  return `${period.name}：普通连续失败 ${state.today_regular_failures || 0} 次，兜底 ${period.fallback_time}`;
+function scheduleMode(task) {
+  if (task.periods?.length) return "periods";
+  return task.random_enabled ? "daily" : "fixed";
+}
+
+function periodStatus(state, plan) {
+  if (Object.hasOwn(periodStatusLabels, state?.status)) return state.status;
+  if (state?.today_succeeded) return "success";
+  if (state?.today_fallback_done) return "failed";
+  return plan.length ? "scheduled" : "unscheduled";
+}
+
+function clockTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : beijingClock.format(date);
+}
+
+function renderPeriodCards(cell, task) {
+  const list = document.createElement("ul");
+  list.className = "task-periods";
+  for (const period of task.periods) {
+    const state = (task.today_periods || []).find(item => item.name === period.name);
+    const plan = (task.today_plan || []).filter(entry => entry.period === period.name);
+    const status = periodStatus(state, plan);
+    const item = document.createElement("li");
+    item.className = "task-period";
+    const heading = document.createElement("div");
+    heading.className = "task-period-heading";
+    const name = document.createElement("strong");
+    name.textContent = period.name;
+    const badge = document.createElement("span");
+    badge.className = `period-status period-status-${status}`;
+    badge.textContent = periodStatusLabels[status];
+    heading.append(name, badge);
+    item.appendChild(heading);
+    addDetail(item, `普通 ${period.times.join("、")} · 兜底 ${period.fallback_time}`);
+    const plannedTimes = plan.filter(entry => entry.kind !== "fallback").map(entry => clockTime(entry.run_at)).filter(Boolean);
+    if (plannedTimes.length) addDetail(item, `今日普通 ${plannedTimes.join("、")}`);
+    const next = clockTime(state?.next_run_at);
+    if (next) addDetail(item, `下次 ${next}`);
+    if (state?.today_regular_failures) addDetail(item, `普通签到连续失败 ${state.today_regular_failures} 次`);
+    list.appendChild(item);
+  }
+  cell.appendChild(list);
+}
+
+function draftPeriods(task) {
+  const times = [...new Set(task.times)].sort();
+  const periods = Array.from({ length: Math.max(2, times.length) }, (_, index) => ({
+    name: `时段 ${index + 1}`,
+    times: times[index] ? [times[index]] : [],
+    fallback_time: ""
+  }));
+  if (times.length >= 2 && task.fallback_time > times[times.length - 1]) {
+    periods[periods.length - 1].fallback_time = task.fallback_time;
+  }
+  return periods;
 }
 
 function renderTasks() {
@@ -118,11 +178,13 @@ function renderTasks() {
   const classId = byId("filterClass").value.trim().toLowerCase();
   const enabled = byId("filterEnabled").value;
   const runtime = byId("filterRuntime").value;
+  const modeFilter = byId("filterMode").value;
   const visible = tasksCache.filter(task =>
     (!name || task.name.toLowerCase().includes(name)) &&
     (!classId || task.class_id.toLowerCase().includes(classId)) &&
     (!enabled || task.enabled === (enabled === "1")) &&
-    (!runtime || task.runtime_status === runtime)
+    (!runtime || task.runtime_status === runtime) &&
+    (!modeFilter || scheduleMode(task) === modeFilter)
   );
   if (!visible.length) {
     tableMessage(tasksCache.length ? "没有符合筛选条件的任务。" : "暂无签到任务，请先在用户配置页扫码创建。");
@@ -136,17 +198,23 @@ function renderTasks() {
     addCell(row, "#" + task.id, "任务编号");
     addCell(row, task.name + " / " + (task.class_id || "无班级信息"), "姓名 / 班级");
     addCell(row, task.lat + " " + task.lng, "坐标");
-    const periods = task.periods || [];
-    const times = addCell(row, periods.length ? `${periods.length} 个时段 · 随机 ±${task.random_minutes} 分钟` : task.times.join(", "), "签到计划");
-    if (periods.length) {
-      for (const period of periods) {
-        addDetail(times, `${period.name}：${period.times.join("、")} · 兜底 ${period.fallback_time}`);
-        const plan = (task.today_plan || []).filter(entry => entry.period === period.name);
-        if (plan.length) addDetail(times, "今日计划：" + plan.map(entry => entry.run_at.slice(11, 19)).join("、"));
+    const mode = scheduleMode(task);
+    const times = addCell(row, "", "签到计划");
+    times.className = "task-schedule-cell";
+    const modeBadge = document.createElement("span");
+    modeBadge.className = "schedule-mode" + (mode === "periods" ? " schedule-mode-periods" : "");
+    modeBadge.textContent = mode === "periods" ? `多时段签到 · ${task.periods.length} 个时段` :
+      mode === "daily" ? "每日完成一次" : "固定时间签到";
+    times.appendChild(modeBadge);
+    if (mode === "periods") {
+      addDetail(times, `普通时间随机 ±${task.random_minutes} 分钟`);
+      renderPeriodCards(times, task);
+    } else {
+      addDetail(times, task.times.join("、"));
+      if (mode === "daily") {
+        addDetail(times, `随机 ±${task.random_minutes} 分钟 · 兜底 ${task.fallback_time}`);
+        addDetail(times, "今日计划：" + (task.today_plan || []).map(entry => clockTime(entry.run_at)).join("、"));
       }
-    } else if (task.random_enabled) {
-      addDetail(times, `随机 ±${task.random_minutes} 分钟 · 兜底 ${task.fallback_time}`);
-      addDetail(times, "今日计划：" + (task.today_plan || []).map(entry => entry.run_at.slice(11, 19)).join(", "));
     }
     addDetail(times, (task.date_start?.slice(0, 10) || "不限") + " 至 " + (task.date_end?.slice(0, 10) || "长期"));
     const state = addCell(row, "", "执行状态");
@@ -159,19 +227,24 @@ function renderTasks() {
     addDetail(state, "下次：" + formatTime(task.next_run_at));
     const result = addCell(row, task.latest_run ? logLabels[task.latest_run.status] || task.latest_run.status : "尚未执行", "最近结果");
     if (task.latest_run) addDetail(result, formatTime(task.latest_run.run_at));
-    if (periods.length) {
-      for (const period of periods) {
-        addDetail(result, describePeriod(period, (task.today_periods || []).find(state => state.name === period.name)));
-      }
-    } else if (task.random_enabled) {
+    if (mode === "daily") {
       addDetail(result, task.today_succeeded ? "今日已成功，跳过其余尝试" : `普通连续失败 ${task.today_regular_failures || 0} 次`);
     }
     const actions = addCell(row, "", "操作");
-    const button = document.createElement("button");
-    button.className = "btn btn-ghost";
-    button.textContent = "详情 / 日志";
-    button.addEventListener("click", () => selectTask(task.id));
-    actions.appendChild(button);
+    const actionsGroup = document.createElement("div");
+    actionsGroup.className = "task-actions";
+    const periodsButton = document.createElement("button");
+    periodsButton.type = "button";
+    periodsButton.className = "btn btn-periods";
+    periodsButton.textContent = mode === "periods" ? "编辑时段" : "多时段签到";
+    periodsButton.addEventListener("click", () => selectTask(task.id, true));
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "btn btn-ghost";
+    details.textContent = "详情 / 日志";
+    details.addEventListener("click", () => selectTask(task.id));
+    actionsGroup.append(periodsButton, details);
+    actions.appendChild(actionsGroup);
     taskTableBody.appendChild(row);
   });
 }
@@ -189,7 +262,9 @@ function updateDayState() {
   if (task?.periods?.length) {
     byId("currentDayState").replaceChildren();
     for (const period of task.periods) {
-      addDetail(byId("currentDayState"), describePeriod(period, (task.today_periods || []).find(state => state.name === period.name)));
+      const state = (task.today_periods || []).find(item => item.name === period.name);
+      const plan = (task.today_plan || []).filter(entry => entry.period === period.name);
+      addDetail(byId("currentDayState"), `${period.name}：${periodStatusLabels[periodStatus(state, plan)]}`);
     }
     return;
   }
@@ -218,15 +293,21 @@ function clearSelection() {
   byId("currentTaskLabel").textContent = "无";
   ["editCoord", "editWxKey", "editQqKey", "editTimes", "editDateStart", "editDateEnd", "editFallbackTime"].forEach(id => byId(id).value = "");
   byId("editRandomEnabled").checked = false;
+  byId("editPeriodDraft").hidden = true;
   periodEditor.set([]);
   updateScheduleMode();
   byId("currentDayState").textContent = "";
   logList.textContent = "请选择左侧任务查看日志。";
 }
 
-function selectTask(id) {
+function selectTask(id, editPeriods = false) {
   const task = tasksCache.find(item => item.id === id);
   if (!task) return;
+  if (editPeriods && currentTaskId === id && byId("editPeriodMode").checked) {
+    focusPeriodEditor();
+    return;
+  }
+  const converting = editPeriods && !task.periods?.length;
   currentTaskId = id;
   byId("currentTaskLabel").textContent = `#${task.id} ${task.name} (${task.class_id || "无班级信息"})`;
   byId("editCoord").value = task.lat + " " + task.lng;
@@ -239,14 +320,23 @@ function selectTask(id) {
   byId("editRandomEnabled").checked = Boolean(task.random_enabled);
   byId("editRandomMinutes").value = task.random_minutes ?? 5;
   byId("editFallbackTime").value = task.fallback_time || "";
-  periodEditor.set(task.periods);
+  periodEditor.set(converting ? draftPeriods(task) : task.periods);
+  byId("editPeriodDraft").hidden = !converting;
   updateScheduleMode();
   updateDayState();
   renderTasks();
   loadLogsForCurrent().catch(error => { if (signedIn) logList.textContent = error.message; });
-  if (window.matchMedia("(max-width: 640px)").matches) {
+  if (editPeriods) {
+    focusPeriodEditor();
+  } else if (window.matchMedia("(max-width: 640px)").matches) {
     byId("taskEditor").scrollIntoView({ behavior: "smooth", block: "start" });
   }
+}
+
+function focusPeriodEditor() {
+  const panel = byId("editPeriodPanel");
+  panel.focus({ preventScroll: true });
+  panel.scrollIntoView({ block: "start" });
 }
 
 async function saveTask() {
@@ -348,7 +438,7 @@ byId("btnReloadLogs").addEventListener("click", () => {
   loadLogsForCurrent().catch(error => { if (signedIn) logList.textContent = error.message; });
 });
 ["filterName", "filterClass"].forEach(id => byId(id).addEventListener("input", renderTasks));
-["filterEnabled", "filterRuntime"].forEach(id => byId(id).addEventListener("change", renderTasks));
+["filterEnabled", "filterRuntime", "filterMode"].forEach(id => byId(id).addEventListener("change", renderTasks));
 
 async function initialize() {
   checkHealth();

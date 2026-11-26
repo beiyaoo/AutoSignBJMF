@@ -573,10 +573,12 @@ def create_app(start_scheduler=True):
                 for log in db.query(TaskLog).join(latest_ids, TaskLog.id == latest_ids.c.log_id).all()
             }
             jobs = app.config["SCHEDULER"].get_jobs()
+            scheduled_runs = {job.id: job.next_run_time for job in jobs if job.next_run_time}
             active_runs = app.config["TASK_RUNTIME"].snapshot()
+            now = local_now()
             daily_states = {
                 state.task_id: state for state in db.query(TaskDay)
-                .filter(TaskDay.local_day == local_now().date().isoformat()).all()
+                .filter(TaskDay.local_day == now.date().isoformat()).all()
             }
 
             return jsonify(
@@ -592,7 +594,7 @@ def create_app(start_scheduler=True):
                         "qq_key": t.qq_key,
                         "times": json.loads(t.times or "[]"),
                         **policy_fields(t),
-                        **day_summary(daily_states.get(t.id), t.periods or ()),
+                        **day_summary(t, daily_states.get(t.id), scheduled_runs, active_runs.get(t.id, {}), now),
                         "enabled": t.enabled,
                         "date_start": t.date_start.isoformat() if t.date_start else None,
                         "date_end": t.date_end.isoformat() if t.date_end else None,
