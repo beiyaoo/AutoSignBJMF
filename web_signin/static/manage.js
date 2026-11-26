@@ -404,7 +404,7 @@ async function loadLogsForCurrent() {
     item.className = "log-item";
     const time = document.createElement("div");
     time.className = "log-time";
-    time.textContent = formatTime(log.run_at, true);
+    time.textContent = log.run_at_beijing || formatTime(log.run_at, true);
     const status = document.createElement("div");
     status.className = "log-status" + (log.status === "error" ? " error" : "");
     status.textContent = logLabels[log.status] || log.status;

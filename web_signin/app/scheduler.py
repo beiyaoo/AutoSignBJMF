@@ -6,6 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete
 
 from .models import Task, TaskLog, TaskDay, TaskNotice
+from .log_display import execution_time_line
 from .schedule_policy import parse_times as _parse_times
 from .daily_schedule import register_random_jobs, execute_random_attempt, dispatch_pending_notices, random_job_id
 
@@ -214,7 +215,7 @@ def _execute_task_job(task_id: int, SessionLocal):
 
         # 生成结构化日志文本，兼顾可读性与调试信息
         log_text_lines = [
-            f"=================={now.strftime('%H:%M:%S')}===================",
+            execution_time_line(now),
             "=========== 用户和班级信息 ===============",
             f"任务 ID: {task.id}",
             f"用户姓名: {user_name or task.name}",

@@ -115,6 +115,41 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(task["latest_run"]["status"], "success")
         self.assertTrue(task["latest_run"]["run_at"].endswith("Z"))
 
+    def test_task_logs_display_beijing_time_for_old_and_new_fixed_runs(self):
+        task_id = self.task()
+        old_run = datetime(2026, 11, 26, 6, 50, 7)
+        old_message = "==================06:50:07===================\n原始状态码: success"
+        with self.app.config["DB_SESSION_FACTORY"]() as db:
+            db.add(TaskLog(task_id=task_id, run_at=old_run, status="success", message=old_message))
+            db.commit()
+
+        new_run = datetime(2026, 11, 26, 19, 12, 34)
+        with patch("web_signin.app.scheduler.datetime", wraps=datetime) as clock, \
+                patch("utils.attendance.Task", return_value=("测试用户", "success")):
+            clock.utcnow.return_value = new_run
+            run_task_job(task_id, self.app)
+
+        owner = QRSessionState(token="owner", created_at=time.time(), cookie="private-cookie", user_name="测试用户")
+        headers = self.login()
+        with patch("web_signin.app.qr_service.get_session_state", return_value=owner):
+            for url in (f"/api/admin/logs?task_id={task_id}", f"/api/tasks/{task_id}/logs", "/api/user/logs?token=owner"):
+                with self.subTest(url=url):
+                    response = self.client.get(url, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+                    new, old = response.json
+                    self.assertEqual(new["run_at"], new_run.isoformat())
+                    self.assertEqual(new["run_at_beijing"], "2026/11/27 03:12:34")
+                    self.assertTrue(new["message"].startswith("执行时间（北京时间）: 2026/11/27 03:12:34"))
+                    self.assertEqual(old["run_at"], old_run.isoformat())
+                    self.assertEqual(old["run_at_beijing"], "2026/11/26 14:50:07")
+                    self.assertEqual(old["message"], "执行时间（北京时间）: 2026/11/26 14:50:07\n原始状态码: success")
+
+        with self.app.config["DB_SESSION_FACTORY"]() as db:
+            stored_old, stored_new = db.query(TaskLog).filter_by(task_id=task_id).order_by(TaskLog.run_at).all()
+            self.assertEqual(stored_old.message, old_message)
+            self.assertEqual(stored_new.run_at, new_run)
+            self.assertTrue(stored_new.message.startswith("执行时间（北京时间）: 2026/11/27 03:12:34"))
+
     def test_schedule_changes_remove_old_times_and_apply_date_range(self):
         task_id = self.task()
         headers = self.login()

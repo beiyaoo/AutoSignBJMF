@@ -1371,7 +1371,7 @@
           item.className = "log-item";
           const time = document.createElement("div");
           time.className = "log-time";
-          time.textContent = log.run_at || "";
+          time.textContent = log.run_at_beijing || log.run_at || "";
           const taskInfo = document.createElement("div");
           taskInfo.className = "log-task";
           if (log.task) {
