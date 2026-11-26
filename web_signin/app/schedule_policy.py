@@ -67,10 +67,6 @@ def _normalize_location(location, period_name):
 def normalize_periods(raw):
     if not isinstance(raw, list):
         raise ValueError("签到时段必须为列表")
-    if not raw:
-        return []
-    if len(raw) < 2:
-        raise ValueError("独立多时段模式至少需要两个时段，例如早上和晚上")
     periods = []
     names = set()
     for item in raw:

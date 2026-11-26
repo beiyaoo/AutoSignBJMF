@@ -147,7 +147,7 @@ function renderPeriodCards(cell, task) {
     heading.append(name, badge);
     item.appendChild(heading);
     const location = period.location;
-    addDetail(item, location ? `地点：${location.name}（${location.lat}, ${location.lng}）` : "地点：沿用任务默认地点");
+    addDetail(item, location ? `地点：${location.name}（${formatCoordinateInput(location)}）` : "地点：沿用任务默认地点");
     addDetail(item, `普通 ${period.times.join("、")} · 兜底 ${period.fallback_time}`);
     const plannedTimes = plan.filter(entry => entry.kind !== "fallback").map(entry => clockTime(entry.run_at)).filter(Boolean);
     if (plannedTimes.length) addDetail(item, `今日普通 ${plannedTimes.join("、")}`);
@@ -199,7 +199,7 @@ function renderTasks() {
     if (task.id === currentTaskId) row.className = "selected";
     addCell(row, "#" + task.id, "任务编号");
     addCell(row, task.name + " / " + (task.class_id || "无班级信息"), "姓名 / 班级");
-    addCell(row, task.lat + " " + task.lng, "默认坐标");
+    addCell(row, formatCoordinateInput(task), "默认坐标");
     const mode = scheduleMode(task);
     const times = addCell(row, "", "签到计划");
     times.className = "task-schedule-cell";
@@ -312,7 +312,7 @@ function selectTask(id, editPeriods = false) {
   const converting = editPeriods && !task.periods?.length;
   currentTaskId = id;
   byId("currentTaskLabel").textContent = `#${task.id} ${task.name} (${task.class_id || "无班级信息"})`;
-  byId("editCoord").value = task.lat + " " + task.lng;
+  byId("editCoord").value = formatCoordinateInput(task);
   byId("editWxKey").value = task.wx_key || "";
   byId("editQqKey").value = task.qq_key || "";
   byId("editTimes").value = task.times.join(",");
@@ -344,18 +344,16 @@ function focusPeriodEditor() {
 async function saveTask() {
   if (!currentTaskId) return alert("请先选择一个任务。");
   const taskId = currentTaskId;
-  const coordinates = byId("editCoord").value.trim().replace(/[,，|、]+/g, " ").split(/\s+/);
-  if (coordinates.length !== 2 || coordinates.some(value => !value || !Number.isFinite(Number(value)))) {
-    return alert("请输入有效的纬度和经度。");
-  }
+  let coordinates;
   let periods;
   try {
+    coordinates = parseCoordinateInput(byId("editCoord").value);
     periods = periodEditor.read();
   } catch (error) {
     return alert(error.message);
   }
   const payload = {
-    lat: coordinates[0], lng: coordinates[1],
+    ...coordinates,
     wx_key: byId("editWxKey").value.trim(), qq_key: byId("editQqKey").value.trim(),
     periods,
     times: periods.length ? [] : byId("editTimes").value.split(/[,，]/).map(value => value.trim()).filter(Boolean),
