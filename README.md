@@ -265,7 +265,7 @@ docker compose --env-file docker.env up -d --build
 数据库挂载到 `bjmf-web-data`，重建前请保留和备份该目录。已有 `bjmf-web` 容器时，先按教程迁移数据库、保留旧容器，再启动新服务。
 更新源码后需要重新构建镜像；只重启容器不会更新镜像内的源码。
 
-使用 `docker run` 的现有服务器可在服务器上运行 `bash update-server.sh` 在线更新。它会先构建镜像，再备份旧容器的数据库并检查新版是否正常启动。获取脚本和自定义分支的方法见 Docker 部署教程第十节。
+已有 Docker Compose 或 `docker run` 部署可在服务器上运行 `bash update-server.sh` 在线更新。脚本会先构建镜像，再备份数据库并检查新版是否正常启动。Compose 部署沿用原项目配置，只更新签到服务。获取脚本的方法见 Docker 部署教程第十节。
 
 ## 注意事项
 

@@ -148,7 +148,7 @@ docker logs --tail=100 bjmf-web
 
 首次扫码后能看到班级码，但还没保存过任务，表示账号已经绑定。填写经纬度、签到时段和通知方式后，首次点击“提交签到任务”即可创建任务。保存后可到管理后台确认。
 
-十、从 GitHub 在线更新（已有 docker run 容器）
+十、从 GitHub 在线更新（Docker Compose 或 docker run）
 
 在服务器 SSH 终端执行。已有 docker.env 时可跳过第二部分。如果没有，请先按第二部分填入管理员配置。
 
@@ -156,6 +156,18 @@ cd /opt/AutoSignBJMF &&
 curl -fL https://raw.githubusercontent.com/beiyaoo/AutoSignBJMF/feat/admin-running-tasks/update-server.sh -o update-server.sh &&
 bash update-server.sh
 
-脚本从 GitHub 下载新版源码，先构建镜像，再停止旧容器备份数据库。新版健康检查通过后留下旧容器和数据库快照。新版启动或健康检查失败时，脚本会尝试恢复旧容器。
-直接使用脚本时，默认项目目录为 /opt/AutoSignBJMF，容器名为 bjmf-web。可通过 BJMF_UPDATE_ROOT、BJMF_UPDATE_REPOSITORY、BJMF_UPDATE_REF 和 BJMF_UPDATE_ENV_FILE 覆盖相应设置。
-已使用 Docker Compose 的部署请继续使用第七部分，避免容器脱离原 Compose 项目。
+脚本根据 bjmf-web 的 Docker 标签识别部署方式。从 GitHub 下载新版源码并构建镜像后，停止签到服务并备份数据库。新版启动或健康检查失败时，脚本会尝试回滚。
+
+Docker Compose 部署沿用原项目、服务、端口和数据库挂载，只更新签到服务。成功后保留旧镜像和数据库备份。需要保留创建此容器时所用的 Compose 配置和环境文件；如果它们已移动或配置已改动，请按脚本提示核对，再执行更新。
+如果使用 Docker 命名卷存放数据库，服务器需要 python3 来核对卷名。
+docker run 部署成功后保留旧容器和数据库备份。
+
+在线更新直接用 GitHub 源码构建容器镜像，本地项目目录里的源码仍是原文件。下次更新可继续运行脚本。若改用 docker compose up -d --build，请先按第七部分更新本地源码。
+脚本检查的容器名为 bjmf-web。Compose 项目目录会从现有容器读取，docker run 部署默认使用 /opt/AutoSignBJMF。可通过 BJMF_UPDATE_ROOT、BJMF_UPDATE_REPOSITORY、BJMF_UPDATE_REF 和 BJMF_UPDATE_ENV_FILE 覆盖相应设置。
+如果现有脚本提示“当前由 Docker Compose 管理”，请重新执行本节的下载命令，再运行下载到的新版脚本。
+如果新版提示 Compose 配置不同，先核对当前容器使用的文件路径，再带上原来的环境文件运行。只查看文件路径可用：
+
+docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' bjmf-web
+docker inspect --format '{{index .Config.Labels "com.docker.compose.project.environment_file"}}' bjmf-web
+
+如需用不同路径的原环境文件重试，可执行 BJMF_UPDATE_ENV_FILE=/实际路径/docker.env bash update-server.sh。
