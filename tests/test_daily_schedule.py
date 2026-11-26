@@ -263,6 +263,32 @@ class DailyScheduleTests(unittest.TestCase):
             for log, name in zip(logs, ("教学楼", "教学楼", "默认地点", "实训楼")):
                 self.assertIn(f"签到地点: {name}", log.message)
 
+    def test_removing_periods_keeps_one_schedule_location_and_old_logs(self):
+        retained = {"name": "晚课", "times": ["18:30:00"], "fallback_time": "19:00:00",
+                    "location": {"name": "实训楼", "lat": "23.32", "lng": "113.52"}}
+        task_id = self.task(random_minutes=0, periods=[
+            {"name": "早课", "times": ["07:30:00", "07:45:00"], "fallback_time": "08:00:00"},
+            {"name": "午间", "times": ["12:00:00"], "fallback_time": "12:30:00"},
+            retained,
+        ])
+        self.attempt(self.args(task_id))
+        before = self.client.get(f"/api/admin/logs?task_id={task_id}", headers=self.headers).json
+        self.assertEqual(len(before), 1)
+        self.assertIn("签到时段: 早课", before[0]["message"])
+
+        saved = self.client.patch(f"/api/admin/tasks/{task_id}", headers=self.headers,
+                                  json={"periods": [retained]})
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json["periods"], [retained])
+        self.assertEqual(saved.json["times"], retained["times"])
+        jobs = self.app.config["SCHEDULER"].get_jobs()
+        remaining_slots = {job.args[4] for job in jobs
+                           if job.id.startswith(f"task_{task_id}_") and not job.id.endswith("_refresh")}
+        self.assertEqual(remaining_slots, {"18:30:00", "19:00:00"})
+        self.assertEqual(self.client.get(f"/api/admin/logs?task_id={task_id}", headers=self.headers).json, before)
+        self.attempt(self.args(task_id), "success")
+        self.assertEqual(self.attendance.call_args.args[0]["lng"], "113.52")
+
     def test_period_locations_validate_and_update_without_rerolling_todays_plan(self):
         qr = QRSessionState(token="qr-test", created_at=time.time(), cookie="location-test-cookie",
                             user_name="地点用户", class_id="1001")

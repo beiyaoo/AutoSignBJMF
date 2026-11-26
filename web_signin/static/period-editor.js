@@ -1,3 +1,18 @@
+function parseCoordinateInput(value) {
+  const coordinates = value.trim().split(/[\s,，|、]+/);
+  const [lng, lat] = coordinates;
+  const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+  if (coordinates.length !== 2 || coordinates.some(part => part.length > 32 || !numeric.test(part)) ||
+      Math.abs(Number(lng)) > 180 || Math.abs(Number(lat)) > 90) {
+    throw new Error("请按经度、纬度填写坐标，例如 113.58,23.31。经度范围为 -180 到 180，纬度范围为 -90 到 90。");
+  }
+  return { lng, lat };
+}
+
+function formatCoordinateInput({ lng, lat }) {
+  return `${lng},${lat}`;
+}
+
 function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
   const periodTemplate = document.createElement("template");
   periodTemplate.innerHTML = `
@@ -25,8 +40,8 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
           <input class="input period-location-name" type="text" placeholder="例如：教学楼" maxlength="40" />
         </div>
         <div class="period-control">
-          <label>纬度、经度</label>
-          <input class="input period-location-coords" type="text" placeholder="例如：23.3000 113.5000" maxlength="80" />
+          <label>经度、纬度</label>
+          <input class="input period-location-coords" type="text" placeholder="例如：113.58,23.31" maxlength="80" />
         </div>
       </div>
       <button class="btn btn-ghost period-remove" type="button">删除时段</button>
@@ -78,7 +93,7 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     locationFields.hidden = !location;
     if (location) {
       locationName.value = location.name;
-      locationCoords.value = `${location.lat} ${location.lng}`;
+      locationCoords.value = formatCoordinateInput(location);
     }
     locationEnabled.addEventListener("change", () => {
       locationFields.hidden = !locationEnabled.checked;
@@ -87,11 +102,11 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     (times.length ? times : [""]).forEach(value => addTime(ordinary, value));
     card.querySelector(".period-add-time").addEventListener("click", () => addTime(ordinary).focus());
     card.querySelector(".period-remove").addEventListener("click", () => {
-      if (list.children.length > 2) card.remove();
-      refreshRemoveButtons();
+      const adjacent = card.nextElementSibling || card.previousElementSibling;
+      card.remove();
+      (adjacent?.querySelector(".period-name") || addButton).focus();
     });
     list.appendChild(card);
-    refreshRemoveButtons();
     return nameInput;
   }
 
@@ -100,12 +115,6 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     let number = 1;
     while (used.has(`时段 ${number}`)) number += 1;
     return addPeriod({ name: `时段 ${number}` });
-  }
-
-  function refreshRemoveButtons() {
-    list.querySelectorAll(".period-remove").forEach(button => {
-      button.hidden = list.children.length <= 2;
-    });
   }
 
   function updateMode() {
@@ -134,18 +143,16 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     const name = card.querySelector(".period-location-name").value.trim();
     if (!name) throw new Error(`请填写「${periodName}」的地点名称。`);
 
-    const coordinates = card.querySelector(".period-location-coords").value.trim().split(/[\s,，|、]+/);
-    const [lat, lng] = coordinates;
-    const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
-    if (coordinates.length !== 2 || coordinates.some(value => value.length > 32 || !numeric.test(value)) ||
-        Math.abs(Number(lat)) > 90 || Math.abs(Number(lng)) > 180) {
-      throw new Error(`「${periodName}」请按纬度、经度的顺序填写专用地点，纬度范围为 -90 到 90，经度范围为 -180 到 180。`);
+    try {
+      return { name, ...parseCoordinateInput(card.querySelector(".period-location-coords").value) };
+    } catch (error) {
+      throw new Error(`「${periodName}」${error.message}`);
     }
-    return { name, lat, lng };
   }
 
   function read() {
     if (!mode.checked) return [];
+    if (!list.children.length) throw new Error("请至少添加一个时段，或关闭「每天分时段签到」。");
     const periods = [...list.children].map((card, index) => {
       const name = card.querySelector(".period-name").value.trim();
       const times = [...new Set([...card.querySelectorAll(".period-times input")]

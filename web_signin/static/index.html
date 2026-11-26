@@ -656,14 +656,14 @@
           <div class="field">
             <div class="label">
               <span class="label-tag">Location</span>
-              <label for="coord">默认地点（纬度、经度）</label>
+              <label for="coord">默认地点（经度、纬度）</label>
             </div>
             <div class="field-row">
               <input
                 id="coord"
                 class="input"
                 type="text"
-                placeholder="例如 26.056756 119.196135（可使用空格、逗号、竖线等任意分隔符）"
+                placeholder="例如：113.58,23.31"
               />
               <button class="btn btn-ghost" id="btnCoordPicker" style="flex-shrink:0;padding-inline:10px">
                 坐标拾取
@@ -671,7 +671,7 @@
             </div>
             <div class="hint-text">
               <span class="hint-strong">提示：</span>
-              可以直接从地图复制整段经纬度，使用空格、逗号、竖线等任意符号分隔，后端会自动解析。
+              经度在前、纬度在后。支持直接粘贴，以逗号、空格或竖线分隔。
             </div>
           </div>
         </div>
@@ -703,7 +703,7 @@
           </label>
         </div>
         <div id="periodPanel" class="period-editor" hidden>
-          <p class="period-copy">每个签到活动可设一个时段。可以改名或继续添加，至少保留两个。一个时段签到成功后，其他时段照常执行。</p>
+          <p class="period-copy">每个签到活动可设一个时段。可以添加、改名或删除，保存时至少保留一个。一个时段签到成功后，其他时段照常执行。</p>
           <p class="period-copy">同一时段连续两次普通签到失败会提醒一次，兜底失败会再提醒。请至少填写一种通知 Key。</p>
           <p class="period-copy">不同活动使用不同地点时，可在对应时段设置专用地点。其余时段沿用上面的默认地点。</p>
           <div id="periodList" class="period-list"></div>
@@ -1125,8 +1125,8 @@
         periodEditor.set(cfg.periods);
         updateScheduleMode();
         // 回填地点
-        if (cfg.lat && cfg.lng) {
-          coordInput.value = cfg.lat + " " + cfg.lng;
+        if (cfg.lat != null && cfg.lng != null) {
+          coordInput.value = formatCoordinateInput(cfg);
         }
         // 回填通知 key
         if (typeof cfg.wx_key === "string") {
@@ -1263,13 +1263,10 @@
         setTaskStatus("error", "尚未识别到账号信息，请确认扫码登录已完成。");
         return;
       }
-      const coord = coordInput.value.trim();
-      if (!coord) {
-        setTaskStatus("error", "请填写经纬度信息（可以直接粘贴整段内容）。");
-        return;
-      }
+      let coordinates;
       let periods;
       try {
+        coordinates = parseCoordinateInput(coordInput.value);
         periods = periodEditor.read();
       } catch (error) {
         setTaskStatus("error", error.message);
@@ -1305,7 +1302,7 @@
             token,
             task_id: currentTaskId,
             reuse_existing: true,
-            coord,
+            ...coordinates,
             wx_key: wxKeyInput.value.trim(),
             qq_key: qqKeyInput.value.trim(),
             periods,
@@ -1374,14 +1371,14 @@
           item.className = "log-item";
           const time = document.createElement("div");
           time.className = "log-time";
-          time.textContent = log.run_at || "";
+          time.textContent = log.run_at_beijing || log.run_at || "";
           const taskInfo = document.createElement("div");
           taskInfo.className = "log-task";
           if (log.task) {
             const parts = [];
             if (log.task.name) parts.push(log.task.name);
             if (log.task.class_id) parts.push("班级：" + log.task.class_id);
-            if (log.task.lat && log.task.lng) parts.push("坐标：" + log.task.lat + "," + log.task.lng);
+            if (log.task.lat != null && log.task.lng != null) parts.push("坐标：" + formatCoordinateInput(log.task));
             taskInfo.textContent = parts.join(" · ");
           }
           const status = document.createElement("div");
@@ -1417,7 +1414,7 @@
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           const { latitude, longitude } = pos.coords;
-          coordInput.value = latitude.toFixed(6) + " " + longitude.toFixed(6);
+          coordInput.value = formatCoordinateInput({ lng: longitude.toFixed(6), lat: latitude.toFixed(6) });
           setTaskStatus("running", "已填入当前的经纬度（大致位置），如需可自行微调或直接提交。");
         },
         (err) => {

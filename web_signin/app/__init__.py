@@ -8,6 +8,7 @@ from .admin import init_admin, require_admin as _require_admin
 from .db import init_db
 from .scheduler import register_existing_tasks, register_task_jobs, unregister_task_jobs, task_schedule_state, _parse_times
 from .models import Task, TaskLog
+from .log_display import task_log_payload
 from .qr_login import QRLoginService
 from .runtime import TaskRuntime
 from .schedule_policy import policy_fields, validate_policy, period_times
@@ -379,17 +380,7 @@ def create_app(start_scheduler=True):
 
     # ========== 阶段三扩展：基于扫码会话的用户配置与日志 ==========
 
-            return jsonify(
-                [
-                    {
-                        "id": log.id,
-                        "run_at": log.run_at.isoformat() if log.run_at else None,
-                        "status": log.status,
-                        "message": log.message,
-                    }
-                    for log in logs
-                ]
-            )
+            return jsonify([task_log_payload(log) for log in logs])
 
     @app.get("/api/user/config")
     def api_get_user_config():
@@ -500,24 +491,7 @@ def create_app(start_scheduler=True):
                 .all()
             )
 
-            return jsonify(
-                [
-                    {
-                        "id": log.id,
-                        "run_at": log.run_at.isoformat() if log.run_at else None,
-                        "status": log.status,
-                        "message": log.message,
-                        "task": {
-                            "id": task.id,
-                            "name": task.name,
-                            "class_id": task.class_id,
-                            "lat": task.lat,
-                            "lng": task.lng,
-                        },
-                    }
-                    for log, task in logs
-                ]
-            )
+            return jsonify([task_log_payload(log, task) for log, task in logs])
 
     # ========== 阶段五：管理员后台与运维接口（后端部分） ==========
 
@@ -761,24 +735,7 @@ def create_app(start_scheduler=True):
 
             logs = query.order_by(TaskLog.run_at.desc()).limit(limit).all()
 
-            return jsonify(
-                [
-                    {
-                        "id": log.id,
-                        "run_at": log.run_at.isoformat() if log.run_at else None,
-                        "status": log.status,
-                        "message": log.message,
-                        "task": {
-                            "id": task.id,
-                            "name": task.name,
-                            "class_id": task.class_id,
-                            "lat": task.lat,
-                            "lng": task.lng,
-                        },
-                    }
-                    for log, task in logs
-                ]
-            )
+            return jsonify([task_log_payload(log, task) for log, task in logs])
 
     @app.delete("/api/admin/tasks/<int:task_id>")
     def api_admin_delete_task(task_id: int):

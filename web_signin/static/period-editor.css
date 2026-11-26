@@ -5,7 +5,6 @@
 }
 .period-editor[hidden],
 .period-legacy[hidden],
-.period-remove[hidden],
 .period-location[hidden],
 .period-controls[hidden] {
   display: none;
