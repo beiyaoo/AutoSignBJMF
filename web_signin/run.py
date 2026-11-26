@@ -1,5 +1,10 @@
 import json
 import os
+import sys
+from pathlib import Path
+
+# Direct script startup also needs the repository's shared utils modules.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import create_app
 
@@ -11,7 +16,7 @@ def _load_port_from_config() -> int:
     优先级：
     1. 环境变量 WEB_SIGNIN_PORT
     2. 当前目录下的 config.json 中的 "port"
-    3. 默认 8000
+    3. 默认 9988
     """
     # 默认端口改为 9988，与 Docker 中暴露的端口保持一致
     default_port = 9988

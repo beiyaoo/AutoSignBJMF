@@ -1,4 +1,10 @@
 /data.json
+/web_signin/config.json
+/web_signin/debug_qr.html
+/bjmf-web-backups/
+/bjmf-web-data/
+/bjmf-web-data-*/
+/.bjmf-update.lock
 __pycache__/
 *.pyc
 /.env

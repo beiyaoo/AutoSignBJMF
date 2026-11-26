@@ -204,14 +204,21 @@ class QRLoginService:
                 # 调用现有逻辑获取用户 + 班级信息
                 student = {"cookie": cookie}
                 user_info, class_info = get_user_and_class_info(student)
+                user_name = (user_info.get("name") or "").strip()
+                class_id = class_info.get("class_id")
+                if not class_id or class_id == "未找到":
+                    class_id = class_info.get("course_id")
 
                 with self._lock:
                     state = self._sessions.get(token)
                     if not state:
                         return
+                    if not user_name or user_name == "未找到":
+                        state.error = "扫码已确认，但未能读取学生姓名。请先确认该微信可在班级魔方查看学生账号，再重新扫码。"
+                        return
                     state.cookie = cookie
-                    state.user_name = user_info.get("name")
-                    state.class_id = class_info.get("class_id")
+                    state.user_name = user_name
+                    state.class_id = class_id
                     state.class_name = class_info.get("class_name")
                     state.class_code = class_info.get("class_code")
                     self._sessions[token] = state

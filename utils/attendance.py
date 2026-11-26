@@ -4,10 +4,70 @@
 """
 
 import re
+from urllib.parse import urlsplit
+
 import requests
 from bs4 import BeautifulSoup
+
 from .user_info import get_user_and_class_info
-from .notification import sendQQmessage, wx_send
+
+
+ACTIVITY_URL = re.compile(r'/student/(punch\w+|daka)/course/(\d+)/(\d+)')
+ACTIVITY_ATTR = re.compile(r'punchcard_(\d+)')
+
+
+def _activity_candidates(response, class_id, module):
+    """Use the activity's actual route when the list page provides one."""
+    route = ACTIVITY_URL.fullmatch(urlsplit(response.url).path.rstrip('/'))
+    links = list(ACTIVITY_URL.finditer(response.text))
+    if route:
+        links.insert(0, route)
+
+    routes = [link.groups() for link in links]
+    candidates = [(punch_type, activity_id) for punch_type, course_id, activity_id in routes
+                  if course_id == str(class_id)]
+    linked_ids = {activity_id for _, activity_id in candidates}
+    candidates.extend((module, activity_id) for activity_id in ACTIVITY_ATTR.findall(response.text)
+                      if activity_id not in linked_ids)
+    return candidates
+
+
+def _has_completed_status(text):
+    return any(marker in text for marker in ('已签到', '已经签到', '已完成签到', '已打卡', '已经打卡'))
+
+
+def _list_shows_completed(response):
+    soup = BeautifulSoup(response.text, 'html.parser')
+    return any(_has_completed_status(element.get_text())
+               for element in soup.select('.punch-success-info, .punch-status'))
+
+
+def _submission_status(response, require_new_sign_in):
+    if response.status_code != 200:
+        print(f"签到请求失败，状态码: {response.status_code}")
+        return 'error'
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    title = soup.find('div', id='title')
+    status_elements = soup.select('.punch-success-info, .punch-status')
+    texts = [element.get_text(strip=True) for element in status_elements]
+    if title:
+        texts.insert(0, title.get_text(strip=True))
+    for text in texts:
+        if '未开始' in text:
+            return 'not_started'
+        if any(marker in text for marker in ('已结束', '已截止', '已关闭', '不在签到时间')):
+            return 'no_sign_in'
+        if any(marker in text for marker in ('失败', '错误', '未登录')):
+            return 'error'
+        if _has_completed_status(text):
+            return 'already_signed'
+        if any(marker in text for marker in ('签到成功', '打卡成功')):
+            return 'success'
+
+    # Existing callers accept the legacy response format. Independent periods
+    # need confirmation so a generic HTTP 200 cannot complete a different slot.
+    return 'unconfirmed_sign_in' if require_new_sign_in else 'success'
 
 
 def Task(student):
@@ -19,8 +79,10 @@ def Task(student):
         
     Returns:
         tuple: (用户名, 签到状态) 
-               状态可能为: 'success'(成功), 'already_signed'(已签到), 'not_started'(未开始), 
-                          'no_sign_in'(无签到), 'error'(错误), 'skip'(跳过)
+               状态可能为: 'success'(成功), 'already_signed'(已签到), 'not_started'(未开始),
+                          'no_sign_in'(无签到), 'no_new_sign_in'(只找到已签到的活动),
+                          'unconfirmed_sign_in'(平台未明确返回签到结果),
+                          'error'(错误), 'skip'(跳过)
     """
     try:
         # 先获取用户和班级信息
@@ -74,11 +136,10 @@ def Task(student):
             print(f"会话预热失败: {e}")
 
         # 2. 探测所有签到/打卡模块的列表页，合并所有签到项
-        module_list = ['punchs', 'daka']
-        all_matches = []
-        all_punch_types = {}  # {id: punch_type}，记录每个签到项所属的模块类型
-
-        for module in module_list:
+        require_new_sign_in = bool(student.get('require_new_sign_in'))
+        candidates = {}
+        list_responses = []
+        for module in ('punchs', 'daka'):
             list_url = f'https://bjmf.k8n.cn/student/course/{ClassID}/{module}'
             session.headers.update({'Referer': f'https://bjmf.k8n.cn/student/course/{ClassID}'})
 
@@ -88,69 +149,21 @@ def Task(student):
                 print(f"获取 {module} 列表页失败: {e}")
                 continue
 
-            # 策略1: 查找 punchcard_ID 格式（DOM属性，模块无关）
-            pattern_id = re.compile(r'punchcard_(\d+)')
-            for mid in pattern_id.findall(response.text):
-                if mid not in all_punch_types:
-                    all_matches.append(mid)
-                    all_punch_types[mid] = module
+            if response.status_code == 200:
+                list_responses.append(response)
+                for candidate in _activity_candidates(response, ClassID, module):
+                    candidates.setdefault(candidate, None)
 
-            # 策略2: 查找链接格式，支持 punchs/punchw/puncha 等以及 daka
-            pattern_link = re.compile(r'/student/(punch\w+|daka)/course/\d+/(\d+)')
-            for ptype, mid in pattern_link.findall(response.text):
-                if mid not in all_punch_types:
-                    all_matches.append(mid)
-                    all_punch_types[mid] = ptype
+        if not list_responses:
+            print("无法取得签到活动列表")
+            return name, 'error'
 
-            # 策略3: 检查是否直接跳转到了签到/打卡页面
-            current_url = response.url
-            url_match = re.search(r'/student/(punch\w+|daka)/course/\d+/(\d+)', current_url)
-            if url_match:
-                ptype, mid = url_match.group(1), url_match.group(2)
-                print(f"检测到直接跳转至 {ptype} 页面，ID: {mid}")
-                if mid not in all_punch_types:
-                    all_matches.append(mid)
-                    all_punch_types[mid] = ptype
-
-        # 去重
-        all_matches = list(set(all_matches))
-
-        if not all_matches:
-            # 尝试检测是否已经签到
-            soup_check = BeautifulSoup(response.text, 'html.parser')
-            
-            # 检查方式1: punch-success-info
-            success_info = soup_check.find(class_='punch-success-info')
-            if success_info and "已签到" in success_info.get_text():
-                print(f"检测到已完成签到: {success_info.get_text(strip=True)}")
-                return name, 'already_signed'
-
-            # 检查方式2: punch-status
-            status_div = soup_check.find(class_='punch-status')
-            if status_div and "已签到" in status_div.get_text():
-                print(f"检测到已完成签到: {status_div.get_text(strip=True)}")
-                return name, 'already_signed'
-
-            print("未找到在进行的签到/不在签到时间内")
-            print(f"Debug: Status Code: {response.status_code}")
-            
-            # Save HTML for debugging
-            with open("debug_html.txt", "w", encoding="utf-8") as f:
-                f.write(response.text)
-            print("Debug: HTML saved to debug_html.txt")
-            
-            # print(f"Debug: Response Text Preview: {response.text[:200]}") # Uncomment for more details
-            return name, 'no_sign_in'
-
-        # 处理每个签到/打卡项
-        for match in all_matches:
-            print(f"签到项: {match} (模块: {all_punch_types.get(match, 'punchs')})")
-
-            punch_type = all_punch_types.get(match, 'punchs')
-
-            url1 = f"https://bjmf.k8n.cn/student/{punch_type}/course/{ClassID}/{match}"
+        outcomes = set()
+        for punch_type, activity_id in candidates:
+            print(f"签到项: {activity_id} (模块: {punch_type})")
+            activity_url = f"https://bjmf.k8n.cn/student/{punch_type}/course/{ClassID}/{activity_id}"
             payload = {
-                'id': match,
+                'id': activity_id,
                 'lat': lat,
                 'lng': lng,
                 'acc': ACC,
@@ -158,34 +171,29 @@ def Task(student):
                 'gps_addr': ''
             }
 
-            response = session.post(url1, data=payload, timeout=10)
-            # x = BeautifulSoup(response.text, 'html.parser')
+            try:
+                response = session.post(activity_url, data=payload, timeout=10)
+            except requests.RequestException as exc:
+                print(f"签到项 {activity_id} 请求失败: {exc}")
+                outcomes.add('error')
+                continue
 
-            if response.status_code == 200:
-                print("网络请求成功")
-                soup_response = BeautifulSoup(response.text, 'html.parser')
-                title_div = soup_response.find('div', id='title')
+            outcome = _submission_status(response, require_new_sign_in)
+            if outcome == 'success':
+                print("本次签到成功")
+                return name, 'success'
+            outcomes.add(outcome)
 
-                if title_div:
-                    title_text = title_div.text.strip()
-                    if "已签到" in title_text:
-                        print("已签到！无需再次签到")
-                        return name, 'already_signed'
-                    elif "未开始" in title_text:
-                        print("未开始签到,请稍后")
-                        return name, 'not_started'
-                    else:
-                        print("本次签到成功")
-                        return name, 'success'
-                else:
-                    # 如果没有找到title_div，可能是签到成功但没有显示
-                    print("签到请求成功，但无法确定状态")
-                    return name, 'success'
-            else:
-                print(f"请求失败，状态码: {response.status_code}")
-                return name, 'error'
-        
-        # 如果没有匹配到任何签到项，返回无签到状态
+        if not candidates and any(_list_shows_completed(response) for response in list_responses):
+            outcomes.add('already_signed')
+        if 'already_signed' in outcomes and not require_new_sign_in:
+            return name, 'already_signed'
+        for outcome in ('unconfirmed_sign_in', 'error', 'not_started'):
+            if outcome in outcomes:
+                return name, outcome
+        if 'already_signed' in outcomes:
+            return name, 'no_new_sign_in'
+        print("未找到在进行的签到/不在签到时间内")
         return name, 'no_sign_in'
     except Exception as e:
         print(f"发生错误{e}，跳过该配置......")

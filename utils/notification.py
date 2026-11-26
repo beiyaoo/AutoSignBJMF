@@ -16,7 +16,7 @@ def sendQQmessage(QmsgKEY, msg: str | None = None):
         msg (str | None): 自定义消息内容；如果为空则使用默认的“签到成功！”模板
     """
     if not QmsgKEY or not QmsgKEY.strip():
-        return
+        return False
 
     try:
         url = f"https://qmsg.zendee.cn/send/{QmsgKEY}"
@@ -26,12 +26,15 @@ def sendQQmessage(QmsgKEY, msg: str | None = None):
             "msg": f"{current_time}  {content}",
         }
         response = requests.post(url, data=message, timeout=10)
-        if response.status_code == 200:
+        payload = response.json() if response.status_code == 200 else {}
+        if response.status_code == 200 and payload.get("success") is True:
             print("QQ消息发送成功")
+            return True
         else:
             print(f"QQ消息发送失败，状态码: {response.status_code}")
-    except Exception as e:
-        print(f"发送QQ消息时出错: {e}")
+    except Exception:
+        print("发送QQ消息时出错")
+    return False
 
 
 def wx_send(key, text: str | None = None, desp: str | None = None):
@@ -44,7 +47,7 @@ def wx_send(key, text: str | None = None, desp: str | None = None):
         desp (str | None): 详细描述，可选
     """
     if not key or not key.strip():
-        return
+        return False
 
     try:
         url = f'https://sctapi.ftqq.com/{key}.send'
@@ -56,12 +59,15 @@ def wx_send(key, text: str | None = None, desp: str | None = None):
             'desp': desp or "123123",
         }
         response = requests.post(url, data=data, timeout=10)
-        if response.status_code == 200:
+        payload = response.json() if response.status_code == 200 else {}
+        if response.status_code == 200 and payload.get("code") == 0:
             print("WX消息发送成功")
+            return True
         else:
             print(f"WX消息发送失败，状态码: {response.status_code}")
-    except Exception as e:
-        print(f"发送微信消息时出错: {e}")
+    except Exception:
+        print("发送微信消息时出错")
+    return False
 
 
 def send_summary_notification(wx_key, results):
