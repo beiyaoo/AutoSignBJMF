@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal, InvalidOperation
 
 
 def parse_times(times_json):
@@ -35,6 +36,34 @@ def policy_fields(task):
     }
 
 
+def _normalize_location(location, period_name):
+    if location is None:
+        return None
+    if not isinstance(location, dict):
+        raise ValueError(f"{period_name}：签到地点格式不正确")
+    name = location.get("name")
+    if not isinstance(name, str) or not name.strip() or not name.isprintable() or len(name.strip()) > 40:
+        raise ValueError(f"{period_name}：请填写 1～40 个字符的地点名称")
+
+    normalized = {"name": name.strip()}
+    for field, label, limit in [("lat", "纬度", 90), ("lng", "经度", 180)]:
+        error = f"{period_name}：{label}必须是 -{limit} 到 {limit} 之间的数字"
+        raw = location.get(field)
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+            raise ValueError(error)
+        text = str(raw).strip()
+        if not text or len(text) > 32:
+            raise ValueError(error)
+        try:
+            value = Decimal(text)
+        except InvalidOperation:
+            raise ValueError(error) from None
+        if not value.is_finite() or not -limit <= value <= limit:
+            raise ValueError(error)
+        normalized[field] = text
+    return normalized
+
+
 def normalize_periods(raw):
     if not isinstance(raw, list):
         raise ValueError("签到时段必须为列表")
@@ -59,7 +88,11 @@ def normalize_periods(raw):
         fallback = parse_times(json.dumps([item.get("fallback_time")]))
         if not fallback or max(times) >= fallback[0]:
             raise ValueError(f"{name}：兜底时间必填，且必须晚于本时段的所有普通时间")
-        periods.append({"name": name, "times": sorted(set(times)), "fallback_time": fallback[0]})
+        period = {"name": name, "times": sorted(set(times)), "fallback_time": fallback[0]}
+        location = _normalize_location(item.get("location"), name)
+        if location is not None:
+            period["location"] = location
+        periods.append(period)
     periods.sort(key=lambda period: period["times"][0])
     for previous, current in zip(periods, periods[1:]):
         if previous["fallback_time"] >= current["times"][0]:

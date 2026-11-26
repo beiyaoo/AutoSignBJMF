@@ -15,6 +15,20 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
         <label>固定兜底时间</label>
         <input class="input period-fallback" type="time" step="1" />
       </div>
+      <label class="period-location-toggle">
+        <input class="period-location-enabled" type="checkbox" />
+        <span>使用此时段的专用地点</span>
+      </label>
+      <div class="period-location" hidden>
+        <div class="period-control">
+          <label>地点名称</label>
+          <input class="input period-location-name" type="text" placeholder="例如：教学楼" maxlength="40" />
+        </div>
+        <div class="period-control">
+          <label>纬度、经度</label>
+          <input class="input period-location-coords" type="text" placeholder="例如：23.3000 113.5000" maxlength="80" />
+        </div>
+      </div>
       <button class="btn btn-ghost period-remove" type="button">删除时段</button>
     </section>`;
   let nextId = 0;
@@ -42,17 +56,33 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     return input;
   }
 
-  function addPeriod({ name = "", times = [], fallback_time = "" } = {}) {
+  function addPeriod({ name = "", times = [], fallback_time = "", location = null } = {}) {
     const card = periodTemplate.content.firstElementChild.cloneNode(true);
     const id = ++nextId;
     const nameInput = card.querySelector(".period-name");
     const fallback = card.querySelector(".period-fallback");
-    for (const [input, suffix] of [[nameInput, "name"], [fallback, "fallback"]]) {
+    const locationEnabled = card.querySelector(".period-location-enabled");
+    const locationFields = card.querySelector(".period-location");
+    const locationName = card.querySelector(".period-location-name");
+    const locationCoords = card.querySelector(".period-location-coords");
+    for (const [input, suffix] of [[nameInput, "name"], [fallback, "fallback"],
+      [locationName, "location-name"], [locationCoords, "location-coords"]]) {
       input.id = `sign-period-${id}-${suffix}`;
       input.previousElementSibling.htmlFor = input.id;
     }
     nameInput.value = name;
     fallback.value = fallback_time || "";
+    locationFields.id = `sign-period-${id}-location`;
+    locationEnabled.setAttribute("aria-controls", locationFields.id);
+    locationEnabled.checked = Boolean(location);
+    locationFields.hidden = !location;
+    if (location) {
+      locationName.value = location.name;
+      locationCoords.value = `${location.lat} ${location.lng}`;
+    }
+    locationEnabled.addEventListener("change", () => {
+      locationFields.hidden = !locationEnabled.checked;
+    });
     const ordinary = card.querySelector(".period-times");
     (times.length ? times : [""]).forEach(value => addTime(ordinary, value));
     card.querySelector(".period-add-time").addEventListener("click", () => addTime(ordinary).focus());
@@ -99,6 +129,21 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     return value.length === 5 ? value + ":00" : value;
   }
 
+  function readLocation(card, periodName) {
+    if (!card.querySelector(".period-location-enabled").checked) return null;
+    const name = card.querySelector(".period-location-name").value.trim();
+    if (!name) throw new Error(`请填写「${periodName}」的地点名称。`);
+
+    const coordinates = card.querySelector(".period-location-coords").value.trim().split(/[\s,，|、]+/);
+    const [lat, lng] = coordinates;
+    const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+    if (coordinates.length !== 2 || coordinates.some(value => value.length > 32 || !numeric.test(value)) ||
+        Math.abs(Number(lat)) > 90 || Math.abs(Number(lng)) > 180) {
+      throw new Error(`「${periodName}」请按纬度、经度的顺序填写专用地点，纬度范围为 -90 到 90，经度范围为 -180 到 180。`);
+    }
+    return { name, lat, lng };
+  }
+
   function read() {
     if (!mode.checked) return [];
     const periods = [...list.children].map((card, index) => {
@@ -111,7 +156,8 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
       if (!fallback || times[times.length - 1] >= fallback) {
         throw new Error(`「${name}」的兜底时间必须晚于该时段所有普通时间。`);
       }
-      return { name, times, fallback_time: fallback };
+      const location = readLocation(card, name);
+      return { name, times, fallback_time: fallback, ...(location ? { location } : {}) };
     });
     if (new Set(periods.map(period => period.name)).size !== periods.length) {
       throw new Error("时段名称不能重复。");

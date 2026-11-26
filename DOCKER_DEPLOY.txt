@@ -113,6 +113,8 @@ docker logs --tail=100 bjmf-web
 教学平台要在早晚分别发布签到活动。如果晚上只查到早上已完成的活动，日志会提示“尚未发现本时段的新签到”，并继续等待本时段剩余尝试或兜底。
 重启会保留当天的随机计划和完成状态。进入后续时段后，不会补跑前一时段的兜底。
 
+不同时段在不同地点时，在对应时段勾选“使用此时段的专用地点”，填地点名称，再按纬度、经度的顺序填坐标。未勾选的时段沿用任务默认地点。普通尝试和兜底都使用该时段配置的地点，后台任务列表和执行日志会显示地点名称。
+
 七、后续更新
 
 上传新的源码，保留 docker.env 和 bjmf-web-data，再在项目根目录执行：
@@ -155,8 +157,8 @@ docker logs --tail=100 bjmf-web
 在服务器 SSH 终端执行。已有 docker.env 时可跳过第二部分。如果没有，请先按第二部分填入管理员配置。
 
 cd /opt/AutoSignBJMF &&
-curl -fL https://raw.githubusercontent.com/beiyaoo/AutoSignBJMF/main/update-server.sh -o update-server.sh &&
-bash update-server.sh
+curl -fL --retry 3 https://raw.githubusercontent.com/beiyaoo/AutoSignBJMF/main/update-server.sh -o update-server.sh &&
+BJMF_UPDATE_REF=main bash update-server.sh
 
 脚本根据 bjmf-web 的 Docker 标签识别部署方式。从 GitHub 下载新版源码并构建镜像后，停止签到服务并备份数据库。新版启动或健康检查失败时，脚本会尝试回滚。
 

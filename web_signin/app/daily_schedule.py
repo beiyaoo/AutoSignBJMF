@@ -32,7 +32,9 @@ def schedule_signature(task):
     config = [sorted(set(parse_times(task.times))), task.random_minutes, task.fallback_time,
               str(task.date_start), str(task.date_end)]
     if task.periods:
-        config.append(task.periods)
+        # Changing a place does not alter today's randomly selected times or attempt history.
+        config.append([{key: period[key] for key in ("name", "times", "fallback_time")}
+                       for period in task.periods])
     return hashlib.sha256(json.dumps(config).encode()).hexdigest()
 
 
@@ -258,9 +260,12 @@ def execute_random_attempt(task_id, app, kind, day, slot, signature):
             return
         if kind == "fallback" and entry.get("end_before") and now >= datetime.fromisoformat(entry["end_before"]):
             return
+        location = next((item.get("location") for item in (task.periods or ()) if item["name"] == period), None)
         student = {
             "name": task.name, "class": task.class_id, "cookie": task.cookie,
-            "lat": task.lat, "lng": task.lng, "acc": task.acc or "30",
+            "lat": location["lat"] if location else task.lat,
+            "lng": location["lng"] if location else task.lng,
+            "acc": task.acc or "30",
             # The daily policy controls notifications; attendance must not send its own.
             "QmsgKEY": "", "WXKey": "",
         }
@@ -299,11 +304,15 @@ def execute_random_attempt(task_id, app, kind, day, slot, signature):
         log_status = "success" if status in SUCCESS else (
             "skipped" if status in {"not_started", "no_sign_in", "no_new_sign_in", "skip"} else "error")
         description = "普通随机尝试" if kind == "regular" else "最后兜底尝试"
+        period_details = []
+        if period is not None:
+            place = location["name"] if location else "默认地点"
+            period_details = [f"签到时段: {period}", f"签到地点: {place}"]
         db.add(TaskLog(task_id=task_id, run_at=now.astimezone(pytz.utc).replace(tzinfo=None),
                        status=log_status, message="\n".join([
                            f"用户姓名: {name or task.name}", f"班级标识: {task.class_id}",
                            f"签到日期: {day}", f"执行类型: {description}",
-                           *([f"签到时段: {period}"] if period is not None else []),
+                           *period_details,
                            f"计划时间: {entry['run_at']}", f"执行时间: {now.isoformat()}",
                            f"原始状态码: {status}", f"签到结果: {label}",
                            f"普通连续失败次数: {progress.get('consecutive_failures', 0)}",

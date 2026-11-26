@@ -656,7 +656,7 @@
           <div class="field">
             <div class="label">
               <span class="label-tag">Location</span>
-              <span>经纬度</span>
+              <label for="coord">默认地点（纬度、经度）</label>
             </div>
             <div class="field-row">
               <input
@@ -705,6 +705,7 @@
         <div id="periodPanel" class="period-editor" hidden>
           <p class="period-copy">每个签到活动可设一个时段。可以改名或继续添加，至少保留两个。一个时段签到成功后，其他时段照常执行。</p>
           <p class="period-copy">同一时段连续两次普通签到失败会提醒一次，兜底失败会再提醒。请至少填写一种通知 Key。</p>
+          <p class="period-copy">不同活动使用不同地点时，可在对应时段设置专用地点。其余时段沿用上面的默认地点。</p>
           <div id="periodList" class="period-list"></div>
           <button id="btnAddPeriod" class="btn btn-ghost" type="button">添加时段</button>
         </div>

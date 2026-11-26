@@ -241,6 +241,69 @@ class DailyScheduleTests(unittest.TestCase):
             self.assertEqual(replaced.json["periods"], [])
             self.assertEqual(replaced.json["times"], ["19:00:00"])
 
+    def test_period_attempts_use_their_location_or_the_task_default(self):
+        task_id = self.task(periods=[
+            {"name": "早课", "times": ["07:30:00"], "fallback_time": "08:00:00",
+             "location": {"name": "教学楼", "lat": "23.31", "lng": "113.51"}},
+            {"name": "午间", "times": ["12:00:00"], "fallback_time": "12:30:00"},
+            {"name": "晚课", "times": ["18:30:00"], "fallback_time": "19:00:00",
+             "location": {"name": "实训楼", "lat": "23.32", "lng": "113.52"}},
+        ])
+        early, midday, evening = (self.args(task_id, index=i) for i in range(3))
+        self.attempt(early)
+        self.attempt(self.args(task_id, "fallback"), "success")
+        self.attempt(midday, "success")
+        self.attempt(evening, "success")
+
+        locations = [(call.args[0]["lat"], call.args[0]["lng"]) for call in self.attendance.call_args_list]
+        self.assertEqual(locations, [("23.31", "113.51"), ("23.31", "113.51"),
+                                     ("30.1", "120.1"), ("23.32", "113.52")])
+        with self.app.config["DB_SESSION_FACTORY"]() as db:
+            logs = db.query(TaskLog).filter_by(task_id=task_id).order_by(TaskLog.id).all()
+            for log, name in zip(logs, ("教学楼", "教学楼", "默认地点", "实训楼")):
+                self.assertIn(f"签到地点: {name}", log.message)
+
+    def test_period_locations_validate_and_update_without_rerolling_todays_plan(self):
+        qr = QRSessionState(token="qr-test", created_at=time.time(), cookie="location-test-cookie",
+                            user_name="地点用户", class_id="1001")
+        periods = [
+            {"name": "早课", "times": ["07:30"], "fallback_time": "08:00",
+             "location": {"name": " 教学楼 ", "lat": 23.31, "lng": " 113.51 "}},
+            {"name": "晚课", "times": ["18:30"], "fallback_time": "19:00"},
+        ]
+        with patch("web_signin.app.qr_service.get_session_state", return_value=qr):
+            created = self.client.post("/api/tasks", headers=self.headers, json={
+                "token": "qr-test", "coord": "30.1 120.1", "periods": periods, "wx_key": "wx-test",
+            })
+        self.assertEqual(created.status_code, 201, created.json)
+        task_id = created.json["id"]
+        self.assertEqual(created.json["periods"][0]["location"], {"name": "教学楼", "lat": "23.31", "lng": "113.51"})
+        self.assertNotIn("location", created.json["periods"][1])
+        plan = self.state(task_id)["plan"]
+        for invalid in ({"lat": "90.000000000001"}, {"lng": -181}, {"lng": "NaN"}, {"lat": True}, {"name": " "}):
+            with self.subTest(invalid=invalid):
+                location = {**periods[0]["location"], **invalid}
+                response = self.client.patch(f"/api/admin/tasks/{task_id}", headers=self.headers, json={
+                    "periods": [dict(periods[0], location=location), periods[1]],
+                })
+                self.assertEqual(response.status_code, 400, response.json)
+        edited_location = {"name": "实训楼", "lat": "23.36", "lng": "113.56"}
+        saved = self.client.patch(f"/api/admin/tasks/{task_id}", headers=self.headers, json={
+            "periods": [dict(periods[0], location=edited_location), periods[1]],
+        })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json["periods"][0]["location"], edited_location)
+        self.assertEqual(self.state(task_id)["plan"], plan)
+        self.attempt(self.args(task_id), "success")
+        self.assertEqual(self.attendance.call_args.args[0]["lat"], "23.36")
+
+        cleared = self.client.patch(f"/api/admin/tasks/{task_id}", headers=self.headers, json={
+            "periods": [dict(periods[0], location=None), periods[1]],
+        })
+        self.assertEqual(cleared.status_code, 200, cleared.json)
+        self.assertNotIn("location", cleared.json["periods"][0])
+        self.assertEqual(self.state(task_id)["plan"], plan)
+
     def test_first_failure_then_already_signed_does_not_alert_or_use_fallback(self):
         task_id = self.task()
         first, second, fallback = self.args(task_id), self.args(task_id, index=1), self.args(task_id, "fallback")
