@@ -257,6 +257,26 @@
     .scroll table { min-width: 760px; }
     .scroll td:first-child { white-space: nowrap; }
     .scroll .btn { white-space: nowrap; }
+    .task-schedule-cell { min-width: 216px; overflow-wrap: anywhere; }
+    .schedule-mode {
+      display: inline-block;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      padding: 2px 7px;
+      color: #cbd5e1;
+    }
+    .schedule-mode-periods, .btn-periods { color: #bae6fd; border-color: #28749a; background: #0c293b; }
+    .task-actions { display: grid; gap: 6px; justify-items: stretch; }
+    .task-actions .btn { justify-content: center; }
+    .task-periods { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 5px; }
+    .task-period { border: 1px solid #334155; border-radius: 8px; padding: 6px 8px; background: #0f172a; }
+    .task-period-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 8px; }
+    .period-status { color: #cbd5e1; font-size: 11px; }
+    .period-status-running { color: #7dd3fc; }
+    .period-status-success { color: #86efac; }
+    .period-status-failed, .period-status-missed { color: #fca5a5; }
+    .period-draft { color: #bae6fd; padding: 8px 10px; border-radius: 8px; background: #0c293b; }
+    #editPeriodPanel { scroll-margin-top: 12px; }
     .table-hint { display: none; margin-top: 8px; }
     @media (max-width: 1100px) { .table-hint { display: block; } }
     .btn:disabled { cursor: wait; opacity: 0.6; }
@@ -286,6 +306,7 @@
       .task-scroll td::before { content: attr(data-label); position: absolute; left: 12px; top: 10px; width: 80px; color: #94a3b8; font-size: 12px; }
       .task-scroll td[colspan] { padding: 14px; }
       .task-scroll td:last-child { border-bottom: 0; }
+      .task-scroll .task-schedule-cell { min-width: 0; padding: 34px 12px 10px; }
       .task-scroll .btn { width: 100%; }
       .table-hint { display: none; }
       #taskEditor .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
@@ -349,6 +370,12 @@
             <option value="disabled">已禁用</option>
             <option value="unscheduled">未注册调度</option>
           </select>
+          <select id="filterMode" aria-label="签到方式">
+            <option value="">全部签到方式</option>
+            <option value="periods">多时段签到</option>
+            <option value="daily">每日完成一次</option>
+            <option value="fixed">固定时间签到</option>
+          </select>
           <button id="btnReloadTasks" class="btn btn-ghost">刷新列表</button>
         </div>
         <div class="scroll task-scroll">
@@ -358,7 +385,7 @@
                 <th>ID</th>
                 <th>姓名 / 班级</th>
                 <th>坐标</th>
-                <th>时间点</th>
+                <th>签到计划</th>
                 <th>执行状态 / 下次执行</th>
                 <th>最近结果</th>
                 <th>操作</th>
@@ -398,8 +425,9 @@
         <div class="field-col">
           <label class="label" for="editPeriodMode"><input id="editPeriodMode" type="checkbox" /> 每天分时段签到</label>
         </div>
-        <div id="editPeriodPanel" class="period-editor" hidden>
-          <p class="period-copy">按时间顺序填写至少两个时段。签到成功只会跳过同一时段的后续尝试。请确保平台为各时段分别发布签到活动，至少填一种通知 Key。</p>
+        <div id="editPeriodPanel" class="period-editor" tabindex="-1" aria-label="多时段签到设置" hidden>
+          <p id="editPeriodDraft" class="period-copy period-draft" role="status" hidden>已把原时间点填入未保存的草稿。请按实际签到活动调整分组和名称，补齐各时段的兜底时间，再点「保存修改」。</p>
+          <p class="period-copy">每个签到活动可设一个时段。可以改名或继续添加，至少保留两个。一个时段签到成功后，其他时段照常执行。请至少填一种通知 Key。</p>
           <div id="editPeriodList" class="period-list"></div>
           <button id="btnEditAddPeriod" class="btn btn-ghost" type="button">添加时段</button>
         </div>

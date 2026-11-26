@@ -164,6 +164,51 @@ class DailyScheduleTests(unittest.TestCase):
         self.assertIn("早上", self.wx.call_args_list[0].args[1])
         self.assertIn("晚上", self.wx.call_args_list[2].args[1])
 
+    def test_admin_lists_four_periods_with_independent_results_and_next_runs(self):
+        task_id = self.task(random_minutes=0, periods=[
+            {"name": "第一节", "times": ["07:30:00"], "fallback_time": "08:00:00"},
+            {"name": "第二节", "times": ["10:00:00"], "fallback_time": "10:30:00"},
+            {"name": "第三节", "times": ["13:00:00"], "fallback_time": "13:30:00"},
+            {"name": "第四节", "times": ["17:00:00"], "fallback_time": "17:30:00"},
+        ])
+        first, second, third, fourth = (self.args(task_id, index=index) for index in range(4))
+        second_fallback = self.args(task_id, "fallback", index=1)
+        self.attempt(first, "success")
+        self.attempt(second)
+        self.attempt(second_fallback)
+        runtime = self.app.config["TASK_RUNTIME"]
+        self.now = ZONE.localize(datetime(2030, 1, 15, 13))
+        third_job = next(job for job in self.app.config["SCHEDULER"].get_jobs() if job.args == third)
+        run_id = runtime.start(task_id, third_job.id)
+        try:
+            rows = self.client.get("/api/admin/tasks", headers=self.headers).json[0]["today_periods"]
+            self.assertEqual([(row["name"], row["status"]) for row in rows], [
+                ("第一节", "success"), ("第二节", "failed"), ("第三节", "running"), ("第四节", "scheduled"),
+            ])
+            self.assertEqual([row["next_run_at"] for row in rows], [None, None, None, "2030-01-15T17:00:00+08:00"])
+        finally:
+            runtime.finish(task_id, run_id)
+        self.attempt(third, "success")
+        self.attempt(fourth, "success")
+        rows = self.client.get("/api/admin/tasks", headers=self.headers).json[0]["today_periods"]
+        self.assertEqual([row["status"] for row in rows], ["success", "failed", "success", "success"])
+
+    def test_switching_from_daily_mode_does_not_replay_new_past_periods(self):
+        task_id = self.task()
+        self.attempt(self.args(task_id), "success")
+        self.now = ZONE.localize(datetime(2030, 1, 15, 13))
+        response = self.client.patch(f"/api/admin/tasks/{task_id}", headers=self.headers, json={"periods": [
+            {"name": "一", "times": ["07:30"], "fallback_time": "08:00"},
+            {"name": "二", "times": ["14:00"], "fallback_time": "14:30"},
+            {"name": "三", "times": ["18:00"], "fallback_time": "18:30"},
+        ]})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(self.args(task_id, "fallback")[4], "14:30:00")
+        restarted = self.new_app()
+        self.assertEqual(self.args(task_id, "fallback", app=restarted)[4], "14:30:00")
+        rows = self.client.get("/api/admin/tasks", headers=self.headers).json[0]["today_periods"]
+        self.assertEqual([row["status"] for row in rows], ["missed", "scheduled", "scheduled"])
+
     def test_restart_at_evening_does_not_replay_the_morning_fallback(self):
         task_id = self.task(periods=[
             {"name": "早上", "times": ["07:30:00"], "fallback_time": "09:00:00"},

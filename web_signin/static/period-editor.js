@@ -4,7 +4,7 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     <section class="period-card" aria-label="签到时段">
       <div class="period-control">
         <label>时段名称</label>
-        <input class="input period-name" type="text" placeholder="例如：早上" maxlength="40" />
+        <input class="input period-name" type="text" placeholder="例如：晚课后" maxlength="40" />
       </div>
       <div class="period-control">
         <span>普通签到时间</span>
@@ -65,6 +65,13 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     return nameInput;
   }
 
+  function addNumberedPeriod() {
+    const used = new Set([...list.querySelectorAll(".period-name")].map(input => input.value.trim()));
+    let number = 1;
+    while (used.has(`时段 ${number}`)) number += 1;
+    return addPeriod({ name: `时段 ${number}` });
+  }
+
   function refreshRemoveButtons() {
     list.querySelectorAll(".period-remove").forEach(button => {
       button.hidden = list.children.length <= 2;
@@ -76,8 +83,8 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     panel.hidden = !enabled;
     legacy.hidden = enabled;
     if (enabled && !list.children.length) {
-      addPeriod({ name: "早上" });
-      addPeriod({ name: "晚上" });
+      addNumberedPeriod();
+      addNumberedPeriod();
     }
   }
 
@@ -109,6 +116,7 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
     if (new Set(periods.map(period => period.name)).size !== periods.length) {
       throw new Error("时段名称不能重复。");
     }
+    periods.sort((first, second) => first.times[0].localeCompare(second.times[0]));
     for (let i = 1; i < periods.length; i++) {
       if (periods[i - 1].fallback_time >= periods[i].times[0]) {
         throw new Error(`「${periods[i].name}」的第一个普通时间必须晚于「${periods[i - 1].name}」的兜底时间。`);
@@ -118,7 +126,11 @@ function createPeriodEditor({ mode, panel, legacy, list, addButton }) {
   }
 
   mode.addEventListener("change", updateMode);
-  addButton.addEventListener("click", () => addPeriod().focus());
+  addButton.addEventListener("click", () => {
+    const name = addNumberedPeriod();
+    name.focus();
+    name.select();
+  });
   updateMode();
   return { read, set };
 }
