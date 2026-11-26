@@ -6,6 +6,7 @@
 .period-editor[hidden],
 .period-legacy[hidden],
 .period-remove[hidden],
+.period-location[hidden],
 .period-controls[hidden] {
   display: none;
 }
@@ -40,6 +41,27 @@
 .period-time-row input,
 .period-fallback {
   color-scheme: dark;
+}
+.period-location-toggle {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.period-location-toggle input {
+  flex: none;
+  margin: 0;
+}
+.period-location {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+@media (max-width: 640px) {
+  .period-location-toggle { min-height: 44px; }
 }
 .period-editor .btn {
   width: fit-content;

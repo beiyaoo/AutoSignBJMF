@@ -384,7 +384,7 @@
               <tr>
                 <th>ID</th>
                 <th>姓名 / 班级</th>
-                <th>坐标</th>
+                <th>默认坐标</th>
                 <th>签到计划</th>
                 <th>执行状态 / 下次执行</th>
                 <th>最近结果</th>
@@ -405,7 +405,7 @@
           <div id="currentDayState" class="status-text" role="status"></div>
         </div>
         <div class="field-col">
-          <div class="label">坐标（lat lng）</div>
+          <label class="label" for="editCoord">默认地点（纬度、经度）</label>
           <input id="editCoord" class="input" placeholder="例如：26.056756 119.196135" />
         </div>
         <div class="field-col">
@@ -428,6 +428,7 @@
         <div id="editPeriodPanel" class="period-editor" tabindex="-1" aria-label="多时段签到设置" hidden>
           <p id="editPeriodDraft" class="period-copy period-draft" role="status" hidden>已把原时间点填入未保存的草稿。请按实际签到活动调整分组和名称，补齐各时段的兜底时间，再点「保存修改」。</p>
           <p class="period-copy">每个签到活动可设一个时段。可以改名或继续添加，至少保留两个。一个时段签到成功后，其他时段照常执行。请至少填一种通知 Key。</p>
+          <p class="period-copy">如果不同活动使用不同地点，可在各时段勾选专用地点。其余时段沿用任务默认地点。</p>
           <div id="editPeriodList" class="period-list"></div>
           <button id="btnEditAddPeriod" class="btn btn-ghost" type="button">添加时段</button>
         </div>

@@ -146,6 +146,8 @@ function renderPeriodCards(cell, task) {
     badge.textContent = periodStatusLabels[status];
     heading.append(name, badge);
     item.appendChild(heading);
+    const location = period.location;
+    addDetail(item, location ? `地点：${location.name}（${location.lat}, ${location.lng}）` : "地点：沿用任务默认地点");
     addDetail(item, `普通 ${period.times.join("、")} · 兜底 ${period.fallback_time}`);
     const plannedTimes = plan.filter(entry => entry.kind !== "fallback").map(entry => clockTime(entry.run_at)).filter(Boolean);
     if (plannedTimes.length) addDetail(item, `今日普通 ${plannedTimes.join("、")}`);
@@ -197,7 +199,7 @@ function renderTasks() {
     if (task.id === currentTaskId) row.className = "selected";
     addCell(row, "#" + task.id, "任务编号");
     addCell(row, task.name + " / " + (task.class_id || "无班级信息"), "姓名 / 班级");
-    addCell(row, task.lat + " " + task.lng, "坐标");
+    addCell(row, task.lat + " " + task.lng, "默认坐标");
     const mode = scheduleMode(task);
     const times = addCell(row, "", "签到计划");
     times.className = "task-schedule-cell";
