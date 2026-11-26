@@ -1,22 +1,25 @@
-version: "3.9"
-
 services:
   web_signin:
+    image: bjmf-web:private
     build:
       context: .
       dockerfile: web_signin/Dockerfile
-    container_name: bjmf-web-signin
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    container_name: bjmf-web
     restart: unless-stopped
     ports:
-      # 左边是宿主机端口，右边是容器内部端口（默认改为 9988，可通过环境变量 WEB_SIGNIN_PORT 覆盖）
-      - "${WEB_SIGNIN_PORT:-9988}:${WEB_SIGNIN_PORT:-9988}"
+      - "${WEB_SIGNIN_HOST_PORT:-${WEB_SIGNIN_PORT:-3155}}:${WEB_SIGNIN_PORT:-9988}"
     environment:
-      # 默认为 9988，如需修改可在运行 docker compose 前设置环境变量 WEB_SIGNIN_PORT
-      - WEB_SIGNIN_PORT=${WEB_SIGNIN_PORT:-9988}
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      WEB_SIGNIN_PORT: ${WEB_SIGNIN_PORT:-9988}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 docker.env 中设置 ADMIN_PASSWORD}
     volumes:
-      # 持久化 SQLite 数据库
-      - ./web_signin/db:/app/web_signin/db
-    # 如需在构建前端静态资源，可以改成多阶段构建，这里保持简单直接运行
+      - "${WEB_SIGNIN_DATA_DIR:-./bjmf-web-data}:/app/web_signin/db"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.getenv('WEB_SIGNIN_PORT','9988')+'/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 

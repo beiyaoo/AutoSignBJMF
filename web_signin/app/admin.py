@@ -1,6 +1,7 @@
 """Administrator authentication for the single-process Web service."""
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -14,6 +15,12 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from .models import Setting
 
+COOKIE_NAME = "bjmf_admin"
+
+
+def csrf_for_token(app, token):
+    return hmac.new(app.config["ADMIN_CSRF_KEY"], token.encode(), hashlib.sha256).hexdigest()
+
 
 def _password_matches(stored_hash, password):
     # Existing installations used SHA-256; migrate after a successful login.
@@ -23,14 +30,22 @@ def _password_matches(stored_hash, password):
 
 
 def require_admin(app):
-    token = request.headers.get("X-Admin-Token", "")
+    header_token = request.headers.get("X-Admin-Token", "")
+    token = header_token or request.cookies.get(COOKIE_NAME, "")
+    valid = False
     with app.config["ADMIN_TOKEN_LOCK"]:
         tokens = app.config["ADMIN_TOKENS"]
         now = datetime.utcnow()
         for expired in [key for key, expiry in tokens.items() if expiry <= now]:
             tokens.pop(expired, None)
         if token and token in tokens:
-            return token, None
+            valid = True
+    if valid:
+        if not header_token and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            supplied = request.headers.get("X-CSRF-Token", "")
+            if not secrets.compare_digest(supplied.encode(), csrf_for_token(app, token).encode()):
+                return None, (jsonify({"error": "请求校验失败，请刷新页面重试", "code": "csrf_required"}), 403)
+        return token, None
     return None, (jsonify({"error": "请先登录管理员账号", "code": "admin_unauthorized"}), 401)
 
 
@@ -53,6 +68,7 @@ def init_admin(app):
     app.config["ADMIN_USERNAME"] = username
     app.config["ADMIN_TOKENS"] = {}
     app.config["ADMIN_TOKEN_LOCK"] = threading.Lock()
+    app.config["ADMIN_CSRF_KEY"] = secrets.token_bytes(32)
 
     with app.config["DB_SESSION_FACTORY"]() as db:
         setting = db.query(Setting).filter(Setting.key == "admin_key_hash").first()
@@ -97,14 +113,17 @@ def init_admin(app):
         expires_in = 24 * 3600
         with app.config["ADMIN_TOKEN_LOCK"]:
             app.config["ADMIN_TOKENS"][token] = datetime.utcnow() + timedelta(seconds=expires_in)
-        return jsonify({"token": token, "expires_in": expires_in, "username": username})
+        response = jsonify({"token": token, "expires_in": expires_in, "username": username})
+        response.set_cookie(COOKIE_NAME, token, max_age=expires_in, httponly=True,
+                            secure=request.is_secure, samesite="Lax", path="/")
+        return response
 
     @admin.get("/me")
     def current_admin():
-        _, error = require_admin(app)
+        token, error = require_admin(app)
         if error:
             return error
-        return jsonify({"username": username})
+        return jsonify({"username": username, "csrf_token": csrf_for_token(app, token)})
 
     @admin.post("/logout")
     def logout():
@@ -113,6 +132,8 @@ def init_admin(app):
             return error
         with app.config["ADMIN_TOKEN_LOCK"]:
             app.config["ADMIN_TOKENS"].pop(token, None)
-        return jsonify({"status": "ok"})
+        response = jsonify({"status": "ok"})
+        response.delete_cookie(COOKIE_NAME, path="/")
+        return response
 
     app.register_blueprint(admin)

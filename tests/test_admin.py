@@ -53,6 +53,9 @@ class AdminTests(unittest.TestCase):
             register_task_jobs(self.app, task)
             return task.id
 
+    def task_jobs(self):
+        return [job for job in self.app.config["SCHEDULER"].get_jobs() if job.id.startswith("task_")]
+
     def test_every_admin_resource_requires_login(self):
         task_id = self.task()
         for method, url in [
@@ -82,7 +85,7 @@ class AdminTests(unittest.TestCase):
         self.assertNotIn(headers["X-Admin-Token"], self.app.config["ADMIN_TOKENS"])
 
     def test_public_initialization_is_disabled_and_no_default_password(self):
-        self.assertEqual(self.client.post("/api/admin/init", json={"key": "takeover"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/admin/init", json={"key": "takeover"}).status_code, 401)
         with self.app.config["DB_SESSION_FACTORY"]() as db:
             db.query(Setting).delete()
             db.commit()
@@ -117,17 +120,17 @@ class AdminTests(unittest.TestCase):
         headers = self.login()
         response = self.client.patch(f"/api/admin/tasks/{task_id}", headers=headers, json={"times": ["09:45"]})
         self.assertEqual(response.status_code, 200)
-        jobs = self.app.config["SCHEDULER"].get_jobs()
+        jobs = self.task_jobs()
         self.assertEqual([job.id for job in jobs], [f"task_{task_id}_094500"])
         response = self.client.patch(f"/api/admin/tasks/{task_id}", headers=headers,
                                      json={"date_start": "2099-01-01", "date_end": "2099-01-02"})
         self.assertEqual(response.status_code, 200)
-        job = self.app.config["SCHEDULER"].get_jobs()[0]
+        job = self.task_jobs()[0]
         self.assertEqual(job.trigger.start_date.year, 2099)
         self.assertEqual(job.trigger.end_date.day, 2)
         self.assertEqual(self.client.get("/api/admin/tasks", headers=headers).json[0]["runtime_status"], "pending")
         self.assertEqual(self.client.patch(f"/api/admin/tasks/{task_id}", headers=headers, json={"enabled": False}).status_code, 200)
-        self.assertEqual(self.app.config["SCHEDULER"].get_jobs(), [])
+        self.assertEqual(self.task_jobs(), [])
         self.assertEqual(self.client.get("/api/admin/tasks", headers=headers).json[0]["runtime_status"], "disabled")
 
     def test_invalid_schedule_update_does_not_change_task(self):
@@ -137,7 +140,7 @@ class AdminTests(unittest.TestCase):
                         {"date_start": "2099-01-02", "date_end": "2099-01-01"}]:
             with self.subTest(payload=payload):
                 self.assertEqual(self.client.patch(f"/api/admin/tasks/{task_id}", headers=headers, json=payload).status_code, 400)
-        self.assertEqual(len(self.app.config["SCHEDULER"].get_jobs()), 2)
+        self.assertEqual(len(self.task_jobs()), 2)
 
     def test_real_execution_transitions_from_running_to_success(self):
         task_id = self.task()
@@ -187,21 +190,73 @@ class AdminTests(unittest.TestCase):
         owner = QRSessionState(token="owner", created_at=time.time(), cookie="private-cookie", user_name="测试用户")
         other = QRSessionState(token="other", created_at=time.time(), cookie="other-cookie", user_name="其他用户")
         with patch("web_signin.app.qr_service.get_session_state", side_effect=lambda token: {"owner": owner, "other": other}.get(token)):
+            headers = self.login()
+            anonymous = self.app.test_client()
             for suffix in ["", "/logs"]:
                 url = f"/api/tasks/{task_id}{suffix}"
-                self.assertEqual(self.client.get(url).status_code, 401)
-                self.assertEqual(self.client.get(url + "?token=other").status_code, 403)
-                self.assertEqual(self.client.get(url + "?token=owner").status_code, 200)
-                self.assertEqual(self.client.get(url, headers=self.login()).status_code, 200)
+                self.assertEqual(anonymous.get(url).status_code, 401)
+                self.assertEqual(anonymous.get(url + "?token=other").status_code, 401)
+                self.assertEqual(anonymous.get(url + "?token=owner").status_code, 401)
+                self.assertEqual(self.client.get(url, headers=headers).status_code, 200)
 
     def test_user_can_still_create_task_and_see_own_logs(self):
-        state = QRSessionState(token="owner", created_at=time.time(), cookie="cookie", user_name="测试用户", class_id="1001")
+        state = QRSessionState(token="owner", created_at=time.time(), cookie="cookie", user_name="测试用户",
+                               class_id="1001", class_code="TEST01")
         with patch("web_signin.app.qr_service.get_session_state", return_value=state):
-            response = self.client.post("/api/tasks", json={"token": "owner", "coord": "30.1,120.1", "times": ["07:30"]})
+            headers = self.login()
+            bound = self.client.get("/api/qr/status?token=owner", headers=headers)
+            self.assertEqual(bound.json["status"], "success")
+            self.assertEqual(bound.json["user"]["class_code"], "TEST01")
+            profile = self.client.get("/api/user/config?token=owner", headers=headers)
+            self.assertEqual(profile.status_code, 200)
+            self.assertFalse(profile.json["has_task"])
+            self.assertIsNone(profile.json["config"])
+            response = self.client.post("/api/tasks", headers=headers, json={"token": "owner", "coord": "30.1,120.1", "times": ["07:30"]})
             self.assertEqual(response.status_code, 201)
             self.assertEqual(response.json["times"], ["07:30:00"])
             self.assertEqual(self.client.get("/api/user/config?token=owner").status_code, 200)
             self.assertEqual(self.client.get("/api/user/logs?token=owner").status_code, 200)
+
+    def test_missing_task_can_be_resubmitted_without_creating_duplicates(self):
+        owner = QRSessionState(token="owner", created_at=time.time(), cookie="private-cookie",
+                               user_name="测试用户", class_id="1001")
+        deleted_id = self.task()
+        other_id = self.task(cookie="other-cookie")
+        headers = self.login()
+        self.assertEqual(self.client.delete(f"/api/admin/tasks/{deleted_id}", headers=headers).status_code, 200)
+        payload = {"token": "owner", "task_id": deleted_id, "reuse_existing": True,
+                   "coord": "30.1 120.1", "times": ["07:30", "19:30"]}
+        with patch("web_signin.app.qr_service.get_session_state", return_value=owner):
+            missing = self.client.post("/api/tasks", headers=headers, json=payload)
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.json["code"], "task_missing")
+            self.assertIn("再点一次", missing.json["error"])
+            foreign = self.client.post("/api/tasks", headers=headers, json={**payload, "task_id": other_id})
+            self.assertEqual(foreign.status_code, 403)
+            self.assertEqual(foreign.json["code"], "task_owner_mismatch")
+
+            payload["task_id"] = None
+            created = self.client.post("/api/tasks", headers=headers, json=payload)
+            self.assertEqual(created.status_code, 201)
+            retried = self.client.post("/api/tasks", headers=headers, json=payload)
+            self.assertEqual(retried.status_code, 200)
+            self.assertEqual(retried.json["id"], created.json["id"])
+            self.assertEqual(retried.json["times"], ["07:30:00", "19:30:00"])
+
+            self.task()
+            ambiguous = self.client.post("/api/tasks", headers=headers, json=payload)
+            self.assertEqual(ambiguous.status_code, 409)
+            self.assertEqual(ambiguous.json["code"], "task_selection_required")
+        with self.app.config["DB_SESSION_FACTORY"]() as db:
+            self.assertEqual(db.query(Task).count(), 3)
+            self.assertEqual(db.get(Task, other_id).cookie, "other-cookie")
+
+    def test_task_submission_explains_how_to_recover_an_expired_qr_session(self):
+        with patch("web_signin.app.qr_service.get_session_state", return_value=None):
+            response = self.client.post("/api/tasks", headers=self.login(), json={"token": "expired"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json["code"], "qr_session_expired")
+        self.assertIn("重新扫码", response.json["error"])
 
     def test_overlapping_executions_remain_running_until_last_finishes(self):
         runtime = self.app.config["TASK_RUNTIME"]
@@ -213,7 +268,12 @@ class AdminTests(unittest.TestCase):
 
     def test_page_routes_and_script_are_available(self):
         for route in ["/", "/admin", "/manage", "/static/manage.js"]:
-            with self.client.get(route) as response:
+            self.assertEqual(self.client.get(route).status_code, 302)
+        with self.client.get("/login") as response:
+            self.assertEqual(response.status_code, 200)
+        headers = self.login()
+        for route in ["/", "/admin", "/manage", "/static/manage.js"]:
+            with self.client.get(route, headers=headers) as response:
                 self.assertEqual(response.status_code, 200)
 
     def test_config_credentials_work_and_environment_takes_priority(self):

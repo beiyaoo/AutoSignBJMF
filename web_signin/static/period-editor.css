@@ -1,0 +1,63 @@
+.period-editor {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+.period-editor[hidden],
+.period-legacy[hidden],
+.period-remove[hidden],
+.period-controls[hidden] {
+  display: none;
+}
+.period-list {
+  display: grid;
+  gap: 10px;
+}
+.period-card {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.45);
+}
+.period-control {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  font-size: 12px;
+}
+.period-control .input {
+  width: 100%;
+}
+.period-time-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.period-time-row input,
+.period-fallback {
+  color-scheme: dark;
+}
+.period-editor .btn {
+  width: fit-content;
+  justify-content: center;
+}
+.period-remove {
+  justify-self: end;
+}
+.period-legacy {
+  display: grid;
+  gap: 4px;
+}
+.period-controls {
+  margin: 8px 0;
+}
+.period-copy {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+}

@@ -9,6 +9,14 @@ class TaskRuntime:
     def __init__(self):
         self._lock = threading.Lock()
         self._runs = {}
+        self._task_locks = {}
+        self.schedule_lock = threading.RLock()
+        self.task_submission_lock = threading.Lock()
+        self.notice_lock = threading.Lock()
+
+    def task_lock(self, task_id):
+        with self._lock:
+            return self._task_locks.setdefault(task_id, threading.RLock())
 
     def start(self, task_id):
         run_id = secrets.token_hex(8)

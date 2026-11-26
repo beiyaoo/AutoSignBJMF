@@ -5,40 +5,9 @@ import pytz
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete
 
-from .models import Task, TaskLog
-
-
-def _parse_times(times_json: str):
-    """
-    将存储在 Task.times 中的 JSON 字符串解析为时间点列表，支持到秒。
-
-    存储格式示例：["07:30:00", "12:30:15"] 或历史数据 ["07:30", "12:30"]。
-    返回标准化后的字符串列表，统一为 "HH:MM:SS"。
-    """
-    try:
-        data = json.loads(times_json)
-        if isinstance(data, list):
-            result = []
-            for t in data:
-                if not isinstance(t, str):
-                    continue
-                # 兼容旧格式 HH:MM，自动补齐为 HH:MM:00
-                if len(t) == 5:
-                    t = t + ":00"
-                # 简单校验
-                parts = t.split(":")
-                if len(parts) != 3:
-                    continue
-                try:
-                    h, m, s = map(int, parts)
-                    if 0 <= h < 24 and 0 <= m < 60 and 0 <= s < 60:
-                        result.append(f"{h:02d}:{m:02d}:{s:02d}")
-                except ValueError:
-                    continue
-            return result
-    except Exception:
-        return []
-    return []
+from .models import Task, TaskLog, TaskDay, TaskNotice
+from .schedule_policy import parse_times as _parse_times
+from .daily_schedule import register_random_jobs, execute_random_attempt, dispatch_pending_notices
 
 
 def _job_id_for(task_id: int, time_str: str) -> str:
@@ -46,11 +15,21 @@ def _job_id_for(task_id: int, time_str: str) -> str:
 
 
 def register_task_jobs(app, task: Task):
+    runtime = app.config["TASK_RUNTIME"]
+    with runtime.task_lock(task.id), runtime.schedule_lock:
+        _register_task_jobs(app, task)
+
+
+def _register_task_jobs(app, task: Task):
     """
     为单个 Task 注册所有时间点的 APScheduler 任务。
     """
     scheduler = app.config["SCHEDULER"]
     unregister_task_jobs(app, task.id)
+    if task.random_enabled:
+        with app.config["TASK_RUNTIME"].schedule_lock:
+            register_random_jobs(app, task)
+        return
     times = _parse_times(task.times)
     for t in times:
         hour, minute, second = t.split(":")
@@ -83,9 +62,11 @@ def unregister_task_jobs(app, task_id: int):
     """
     scheduler = app.config["SCHEDULER"]
     # APScheduler 本身没有按前缀批量获取 job 的标准接口，实际实现中可维护映射。
-    for job in scheduler.get_jobs():
-        if job.id.startswith(f"task_{task_id}_"):
-            scheduler.remove_job(job.id)
+    runtime = app.config["TASK_RUNTIME"]
+    with runtime.task_lock(task_id), runtime.schedule_lock:
+        for job in scheduler.get_jobs():
+            if job.id.startswith(f"task_{task_id}_"):
+                scheduler.remove_job(job.id)
 
 
 def register_existing_tasks(app):
@@ -110,6 +91,10 @@ def cleanup_old_logs(db):
     threshold = datetime.utcnow() - timedelta(days=7)
     stmt = delete(TaskLog).where(TaskLog.run_at < threshold)
     db.execute(stmt)
+    cutoff = (datetime.now(pytz.timezone("Asia/Shanghai")) - timedelta(days=7)).date().isoformat()
+    old_days = db.query(TaskDay.id).filter(TaskDay.local_day < cutoff)
+    db.execute(delete(TaskNotice).where(TaskNotice.day_id.in_(old_days)))
+    db.execute(delete(TaskDay).where(TaskDay.local_day < cutoff))
     db.commit()
 
 
@@ -121,7 +106,7 @@ def task_schedule_state(app, task, jobs=None, active_runs=None):
         active_runs = app.config["TASK_RUNTIME"].snapshot()
     next_runs = [
         job.next_run_time for job in jobs
-        if job.id.startswith(f"task_{task.id}_") and job.next_run_time
+        if job.id.startswith(f"task_{task.id}_") and not job.id.endswith("_refresh") and job.next_run_time
     ]
     local_now = datetime.now(pytz.timezone("Asia/Shanghai")).replace(tzinfo=None)
     running = active_runs.get(task.id, {})
@@ -145,13 +130,19 @@ def task_schedule_state(app, task, jobs=None, active_runs=None):
     }
 
 
-def run_task_job(task_id: int, app):
+def run_task_job(task_id: int, app, kind="fixed", day=None, slot=None, signature=None):
     runtime = app.config["TASK_RUNTIME"]
-    run_id = runtime.start(task_id)
-    try:
-        _execute_task_job(task_id, app.config["DB_SESSION_FACTORY"])
-    finally:
-        runtime.finish(task_id, run_id)
+    with runtime.task_lock(task_id):
+        run_id = runtime.start(task_id)
+        try:
+            if kind == "fixed":
+                _execute_task_job(task_id, app.config["DB_SESSION_FACTORY"])
+            else:
+                execute_random_attempt(task_id, app, kind, day, slot, signature)
+        finally:
+            runtime.finish(task_id, run_id)
+    if kind != "fixed":
+        dispatch_pending_notices(app)
 
 
 def _execute_task_job(task_id: int, SessionLocal):
@@ -165,7 +156,7 @@ def _execute_task_job(task_id: int, SessionLocal):
 
     with SessionLocal() as db:
         task = db.query(Task).filter(Task.id == task_id).first()
-        if not task or not task.enabled:
+        if not task or not task.enabled or task.random_enabled:
             return
         local_now = datetime.now(pytz.timezone("Asia/Shanghai")).replace(tzinfo=None)
         if task.date_start and local_now < task.date_start:

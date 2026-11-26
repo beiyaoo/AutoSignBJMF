@@ -1,15 +1,21 @@
 const byId = id => document.getElementById(id);
-const loginForm = byId("loginForm");
-const loginError = byId("loginError");
 const adminPanel = byId("adminPanel");
 const taskTableBody = byId("taskTableBody");
 const logList = byId("logList");
+const periodEditor = createPeriodEditor({
+  mode: byId("editPeriodMode"),
+  panel: byId("editPeriodPanel"),
+  legacy: byId("editLegacySchedule"),
+  list: byId("editPeriodList"),
+  addButton: byId("btnEditAddPeriod")
+});
 const runtimeLabels = {
   running: "正在执行", scheduled: "等待调度", pending: "尚未生效",
   expired: "已到期", disabled: "已禁用", unscheduled: "未注册调度"
 };
 const logLabels = { success: "签到成功", error: "执行出错", skipped: "已跳过" };
-let adminToken = sessionStorage.getItem("bjmf_admin_token") || "";
+let signedIn = false;
+let sessionVersion = 0;
 let refreshTimer = null;
 let refreshing = false;
 let currentTaskId = null;
@@ -24,24 +30,20 @@ function formatTime(value, utc = false) {
   });
 }
 
-function showLogin(message = "") {
+function showLogin() {
   clearInterval(refreshTimer);
   refreshTimer = null;
-  adminToken = "";
-  sessionStorage.removeItem("bjmf_admin_token");
+  signedIn = false;
+  sessionVersion += 1;
   tasksCache = [];
   clearSelection();
   taskTableBody.replaceChildren();
   adminPanel.hidden = true;
-  loginForm.hidden = false;
-  byId("adminIdentity").hidden = true;
-  byId("btnLogout").hidden = true;
-  byId("adminPassword").value = "";
-  loginError.textContent = message;
+  location.assign("/login?next=/admin");
 }
 
 function showDashboard(username) {
-  loginForm.hidden = true;
+  signedIn = true;
   adminPanel.hidden = false;
   byId("adminIdentity").textContent = "管理员：" + username;
   byId("adminIdentity").hidden = false;
@@ -51,23 +53,17 @@ function showDashboard(username) {
   refreshDashboard();
 }
 
-async function apiRequest(path, options = {}, authenticated = true) {
-  const requestToken = adminToken;
-  if (authenticated && !requestToken) throw new Error("请先登录");
+async function apiRequest(path, options = {}) {
+  const version = sessionVersion;
+  if (!signedIn) throw new Error("请先登录");
   const response = await fetch(path, {
-    ...options,
-    cache: "no-store",
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...options.headers,
-      ...(authenticated ? { "X-Admin-Token": requestToken } : {})
-    }
+    ...options, cache: "no-store",
+    headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers }
   });
   const data = await response.json();
-  // Discard requests from a session that was logged out while fetching.
-  if (authenticated && requestToken !== adminToken) throw new Error("登录状态已改变");
+  if (!signedIn || version !== sessionVersion) throw new Error("登录状态已改变");
   if (!response.ok) {
-    if (authenticated && response.status === 401) showLogin("登录已失效，请重新登录。");
+    if (response.status === 401) showLogin();
     throw new Error(data.error || "请求失败");
   }
   return data;
@@ -92,8 +88,9 @@ function tableMessage(message) {
   taskTableBody.replaceChildren(row);
 }
 
-function addCell(row, value) {
+function addCell(row, value, label) {
   const cell = document.createElement("td");
+  cell.dataset.label = label;
   cell.textContent = value;
   row.appendChild(cell);
   return cell;
@@ -104,6 +101,13 @@ function addDetail(cell, value) {
   detail.className = "muted";
   detail.textContent = value;
   cell.appendChild(detail);
+}
+
+function describePeriod(period, state) {
+  if (!state) return `${period.name}：今日暂无计划`;
+  if (state.today_succeeded) return `${period.name}：已签到，跳过时段内剩余尝试`;
+  if (state.today_fallback_done) return `${period.name}：兜底签到结束，尚未签到`;
+  return `${period.name}：普通连续失败 ${state.today_regular_failures || 0} 次，兜底 ${period.fallback_time}`;
 }
 
 function renderTasks() {
@@ -129,12 +133,23 @@ function renderTasks() {
     const row = document.createElement("tr");
     row.dataset.id = task.id;
     if (task.id === currentTaskId) row.className = "selected";
-    addCell(row, "#" + task.id);
-    addCell(row, task.name + " / " + (task.class_id || "无班级信息"));
-    addCell(row, task.lat + " " + task.lng);
-    const times = addCell(row, task.times.join(", "));
+    addCell(row, "#" + task.id, "任务编号");
+    addCell(row, task.name + " / " + (task.class_id || "无班级信息"), "姓名 / 班级");
+    addCell(row, task.lat + " " + task.lng, "坐标");
+    const periods = task.periods || [];
+    const times = addCell(row, periods.length ? `${periods.length} 个时段 · 随机 ±${task.random_minutes} 分钟` : task.times.join(", "), "签到计划");
+    if (periods.length) {
+      for (const period of periods) {
+        addDetail(times, `${period.name}：${period.times.join("、")} · 兜底 ${period.fallback_time}`);
+        const plan = (task.today_plan || []).filter(entry => entry.period === period.name);
+        if (plan.length) addDetail(times, "今日计划：" + plan.map(entry => entry.run_at.slice(11, 19)).join("、"));
+      }
+    } else if (task.random_enabled) {
+      addDetail(times, `随机 ±${task.random_minutes} 分钟 · 兜底 ${task.fallback_time}`);
+      addDetail(times, "今日计划：" + (task.today_plan || []).map(entry => entry.run_at.slice(11, 19)).join(", "));
+    }
     addDetail(times, (task.date_start?.slice(0, 10) || "不限") + " 至 " + (task.date_end?.slice(0, 10) || "长期"));
-    const state = addCell(row, "");
+    const state = addCell(row, "", "执行状态");
     const tag = document.createElement("span");
     tag.className = "tag tag-" + task.runtime_status;
     tag.textContent = runtimeLabels[task.runtime_status] || "未知";
@@ -142,9 +157,16 @@ function renderTasks() {
     if (!task.enabled && task.runtime_status === "running") addDetail(state, "已禁用，等待本次执行结束");
     if (task.running_since) addDetail(state, "开始：" + formatTime(task.running_since));
     addDetail(state, "下次：" + formatTime(task.next_run_at));
-    const result = addCell(row, task.latest_run ? logLabels[task.latest_run.status] || task.latest_run.status : "尚未执行");
+    const result = addCell(row, task.latest_run ? logLabels[task.latest_run.status] || task.latest_run.status : "尚未执行", "最近结果");
     if (task.latest_run) addDetail(result, formatTime(task.latest_run.run_at));
-    const actions = addCell(row, "");
+    if (periods.length) {
+      for (const period of periods) {
+        addDetail(result, describePeriod(period, (task.today_periods || []).find(state => state.name === period.name)));
+      }
+    } else if (task.random_enabled) {
+      addDetail(result, task.today_succeeded ? "今日已成功，跳过其余尝试" : `普通连续失败 ${task.today_regular_failures || 0} 次`);
+    }
+    const actions = addCell(row, "", "操作");
     const button = document.createElement("button");
     button.className = "btn btn-ghost";
     button.textContent = "详情 / 日志";
@@ -159,17 +181,33 @@ async function loadTasks() {
   tasksCache = Array.isArray(tasks) ? tasks : [];
   if (currentTaskId && !tasksCache.some(task => task.id === currentTaskId)) clearSelection();
   renderTasks();
+  updateDayState();
+}
+
+function updateDayState() {
+  const task = tasksCache.find(item => item.id === currentTaskId);
+  if (task?.periods?.length) {
+    byId("currentDayState").replaceChildren();
+    for (const period of task.periods) {
+      addDetail(byId("currentDayState"), describePeriod(period, (task.today_periods || []).find(state => state.name === period.name)));
+    }
+    return;
+  }
+  byId("currentDayState").textContent = task?.random_enabled
+    ? (task.today_succeeded ? "今日已签到成功，跳过剩余普通尝试和兜底。" :
+       `今日普通连续失败 ${task.today_regular_failures || 0} 次；${task.today_fallback_done ? "兜底已执行" : "等待最后兜底 " + task.fallback_time}。`)
+    : "";
 }
 
 async function refreshDashboard() {
-  if (!adminToken || refreshing) return;
+  if (!signedIn || refreshing) return;
   refreshing = true;
   try {
     await loadTasks();
     if (currentTaskId) await loadLogsForCurrent();
     byId("refreshStatus").textContent = "上次刷新：" + formatTime(new Date().toISOString()) + " · 每 10 秒自动刷新 · 北京时间";
   } catch (error) {
-    if (adminToken) byId("refreshStatus").textContent = "刷新失败：" + error.message;
+    if (signedIn) byId("refreshStatus").textContent = "刷新失败：" + error.message;
   } finally {
     refreshing = false;
   }
@@ -178,7 +216,11 @@ async function refreshDashboard() {
 function clearSelection() {
   currentTaskId = null;
   byId("currentTaskLabel").textContent = "无";
-  ["editCoord", "editWxKey", "editQqKey", "editTimes", "editDateStart", "editDateEnd"].forEach(id => byId(id).value = "");
+  ["editCoord", "editWxKey", "editQqKey", "editTimes", "editDateStart", "editDateEnd", "editFallbackTime"].forEach(id => byId(id).value = "");
+  byId("editRandomEnabled").checked = false;
+  periodEditor.set([]);
+  updateScheduleMode();
+  byId("currentDayState").textContent = "";
   logList.textContent = "请选择左侧任务查看日志。";
 }
 
@@ -194,8 +236,17 @@ function selectTask(id) {
   byId("editEnabled").value = task.enabled ? "1" : "0";
   byId("editDateStart").value = task.date_start?.slice(0, 10) || "";
   byId("editDateEnd").value = task.date_end?.slice(0, 10) || "";
+  byId("editRandomEnabled").checked = Boolean(task.random_enabled);
+  byId("editRandomMinutes").value = task.random_minutes ?? 5;
+  byId("editFallbackTime").value = task.fallback_time || "";
+  periodEditor.set(task.periods);
+  updateScheduleMode();
+  updateDayState();
   renderTasks();
-  loadLogsForCurrent().catch(error => { if (adminToken) logList.textContent = error.message; });
+  loadLogsForCurrent().catch(error => { if (signedIn) logList.textContent = error.message; });
+  if (window.matchMedia("(max-width: 640px)").matches) {
+    byId("taskEditor").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 async function saveTask() {
@@ -205,11 +256,21 @@ async function saveTask() {
   if (coordinates.length !== 2 || coordinates.some(value => !value || !Number.isFinite(Number(value)))) {
     return alert("请输入有效的纬度和经度。");
   }
+  let periods;
+  try {
+    periods = periodEditor.read();
+  } catch (error) {
+    return alert(error.message);
+  }
   const payload = {
     lat: coordinates[0], lng: coordinates[1],
     wx_key: byId("editWxKey").value.trim(), qq_key: byId("editQqKey").value.trim(),
-    times: byId("editTimes").value.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+    periods,
+    times: periods.length ? [] : byId("editTimes").value.split(/[,，]/).map(value => value.trim()).filter(Boolean),
     enabled: byId("editEnabled").value === "1",
+    random_enabled: periods.length > 0 || byId("editRandomEnabled").checked,
+    random_minutes: Number(byId("editRandomMinutes").value),
+    fallback_time: periods.length ? null : byId("editFallbackTime").value || null,
     date_start: byId("editDateStart").value || null, date_end: byId("editDateEnd").value || null
   };
   byId("btnSaveTask").disabled = true;
@@ -219,7 +280,7 @@ async function saveTask() {
     if (currentTaskId === taskId) selectTask(taskId);
     alert("保存成功，签到调度已更新。");
   } catch (error) {
-    if (adminToken) alert("保存失败：" + error.message);
+    if (signedIn) alert("保存失败：" + error.message);
   } finally {
     byId("btnSaveTask").disabled = false;
   }
@@ -234,7 +295,7 @@ async function deleteTask() {
     if (currentTaskId === taskId) clearSelection();
     await loadTasks();
   } catch (error) {
-    if (adminToken) alert("删除失败：" + error.message);
+    if (signedIn) alert("删除失败：" + error.message);
   }
 }
 
@@ -265,26 +326,6 @@ async function loadLogsForCurrent() {
   });
 }
 
-loginForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  loginError.textContent = "";
-  byId("btnLogin").disabled = true;
-  try {
-    const data = await apiRequest("/api/admin/login", {
-      method: "POST",
-      body: JSON.stringify({ username: byId("adminUsername").value.trim(), password: byId("adminPassword").value })
-    }, false);
-    adminToken = data.token;
-    sessionStorage.setItem("bjmf_admin_token", adminToken);
-    byId("adminPassword").value = "";
-    showDashboard(data.username);
-  } catch (error) {
-    loginError.textContent = error.message;
-  } finally {
-    byId("btnLogin").disabled = false;
-  }
-});
-
 byId("btnLogout").addEventListener("click", async () => {
   byId("btnLogout").disabled = true;
   try { await apiRequest("/api/admin/logout", { method: "POST" }); }
@@ -295,20 +336,25 @@ byId("btnLogout").addEventListener("click", async () => {
   }
 });
 byId("btnReloadTasks").addEventListener("click", refreshDashboard);
+function updateScheduleMode() {
+  byId("editRandomOptions").hidden = !byId("editRandomEnabled").checked;
+  byId("editRandomMinuteControl").hidden = !byId("editPeriodMode").checked && !byId("editRandomEnabled").checked;
+}
+byId("editRandomEnabled").addEventListener("change", updateScheduleMode);
+byId("editPeriodMode").addEventListener("change", updateScheduleMode);
 byId("btnSaveTask").addEventListener("click", saveTask);
 byId("btnDeleteTask").addEventListener("click", deleteTask);
 byId("btnReloadLogs").addEventListener("click", () => {
-  loadLogsForCurrent().catch(error => { if (adminToken) logList.textContent = error.message; });
+  loadLogsForCurrent().catch(error => { if (signedIn) logList.textContent = error.message; });
 });
 ["filterName", "filterClass"].forEach(id => byId(id).addEventListener("input", renderTasks));
 ["filterEnabled", "filterRuntime"].forEach(id => byId(id).addEventListener("change", renderTasks));
 
 async function initialize() {
   checkHealth();
-  if (!adminToken) return showLogin();
   try {
-    const admin = await apiRequest("/api/admin/me");
+    const admin = await window.siteAuthReady;
     showDashboard(admin.username);
-  } catch (error) { showLogin(error.message); }
+  } catch (_) { showLogin(); }
 }
 initialize();

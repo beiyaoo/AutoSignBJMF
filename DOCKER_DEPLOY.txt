@@ -1,0 +1,161 @@
+班级魔方自动签到：服务器 Docker 部署教程
+
+本版本支持同一学生每天分多个时段签到，并为提交失败提供对应的恢复提示。
+默认对外端口为 3155，容器内部端口为 9988。
+
+一、上传文件与进入正确目录
+
+将 AutoSignBJMF-server-multi-period.zip 上传到服务器的 /tmp 目录。压缩包内只有一个 AutoSignBJMF 目录。
+在服务器 SSH 终端执行下面的命令，把新版源码解压到 /opt/AutoSignBJMF：
+
+unzip -o /tmp/AutoSignBJMF-server-multi-period.zip -d /opt
+
+如果上传到其他目录，请替换命令中的压缩包路径。原来的 bjmf-web-data、web_signin/db 和 docker.env 应继续保留。
+本部署包不包含个人数据库、Cookie、通知 Key 或管理员密码。
+
+所有后续命令在服务器的 SSH 终端执行，先进入项目根目录：
+
+cd /opt/AutoSignBJMF
+ls web_signin/Dockerfile docker-compose.yml docker.env.example
+
+请在 /opt/AutoSignBJMF 执行构建命令，而不是 /opt/AutoSignBJMF/web_signin。
+
+二、填写管理员密码
+
+如果还没有 docker.env：
+
+cp -n docker.env.example docker.env
+chmod 600 docker.env
+nano docker.env
+
+填写 ADMIN_PASSWORD=你自己的管理员密码。直接填值，不需要额外加引号。
+默认 ADMIN_USERNAME=admin。
+WEB_SIGNIN_HOST_PORT=3155 是外部端口，WEB_SIGNIN_PORT=9988 是容器内部端口。
+文件已配置清华 pip 镜像，依赖安装会使用镜像源。
+
+三、第一次部署（推荐 Docker Compose）
+
+docker compose version
+docker compose --env-file docker.env up -d --build
+docker compose --env-file docker.env ps
+docker compose --env-file docker.env logs --tail=100 web_signin
+
+在浏览器访问：
+
+http://服务器IP:3155/login
+
+将“服务器IP”替换为实际地址。登录后首页是签到配置页，/admin 是任务后台。
+
+四、你已经有 docker run 启动的 bjmf-web 容器时
+
+先构建新镜像，构建成功后再停止旧服务：
+
+docker compose --env-file docker.env build web_signin
+docker stop bjmf-web
+mkdir -p bjmf-web-data
+
+如果 bjmf-web-data/web_signin.db 已存在，说明已有持久化数据库，继续保留它。
+如果它不存在，从刚停止的旧容器复制数据库：
+
+if [ ! -f bjmf-web-data/web_signin.db ]; then
+  docker cp bjmf-web:/app/web_signin/db/. ./bjmf-web-data/
+fi
+
+确认上面的复制成功后，保留旧容器并启动新服务：
+
+docker rename bjmf-web "bjmf-web-backup-$(date +%Y%m%d-%H%M%S)"
+docker compose --env-file docker.env up -d
+docker compose --env-file docker.env ps
+
+数据库启动时自动更新表结构，保留原签到任务、日志和任务原有策略。要启用独立时段，请按第六部分编辑原任务。
+
+五、服务器没有 Docker Compose 时，使用 docker run
+
+在项目根目录先填写 docker.env，然后先构建新镜像：
+
+docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t bjmf-web:private -f web_signin/Dockerfile .
+
+如果已有 bjmf-web 容器，构建成功后执行以下备份步骤；首次部署直接跳到 docker run：
+
+docker inspect --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' bjmf-web
+docker stop bjmf-web
+mkdir -p bjmf-web-data
+if [ ! -f bjmf-web-data/web_signin.db ]; then
+  docker cp bjmf-web:/app/web_signin/db/. ./bjmf-web-data/
+fi
+
+确认复制成功后，再保留旧容器：
+
+docker rename bjmf-web "bjmf-web-backup-$(date +%Y%m%d-%H%M%S)"
+
+启动新容器：
+
+docker run -d --name bjmf-web --restart unless-stopped --env-file docker.env -p 3155:9988 -v "$PWD/bjmf-web-data:/app/web_signin/db" bjmf-web:private
+docker logs --tail=100 bjmf-web
+
+如果原容器使用其他目录持久化数据库，请改用原目录挂载到 /app/web_signin/db。上面的 docker inspect 会列出实际的目录。
+
+六、给同一个人配置独立签到时段
+
+已有任务：打开管理后台，选中该学生的任务，点“详情 / 日志”进入编辑。
+新建任务：使用管理员账号登录首页，用学生的微信扫码，再填写经纬度。
+
+勾选“每天分时段签到”，为同一条任务配置早晚两个时段。例如：
+
+早上  普通时间 07:30、07:50    固定兜底 08:10
+晚上  普通时间 18:30、18:50    固定兜底 19:10
+
+把时间换成教学平台实际开放时间。保留默认前后浮动 5 分钟，填写微信或 QQ 通知 Key（至少一种），保存任务。
+各时段互不影响。早上成功后，只跳过早上剩余尝试和早上兜底，晚上仍按计划检查。
+同一时段内，普通尝试连续两次失败提醒一次，兜底失败另外提醒一次。原有单日一次、固定时间模式继续可用。
+教学平台要在早晚分别发布签到活动。如果晚上只查到早上已完成的活动，日志会提示“尚未发现本时段的新签到”，并继续等待本时段剩余尝试或兜底。
+重启会保留当天的随机计划和完成状态。进入后续时段后，不会补跑前一时段的兜底。
+
+七、后续更新
+
+上传新的源码，保留 docker.env 和 bjmf-web-data，再在项目根目录执行：
+
+docker compose --env-file docker.env up -d --build
+
+源码已复制进镜像，更新后需要重新 build；docker restart 本身不会更新镜像里的代码。
+依赖文件不变时，Docker 可以复用已安装依赖的镜像层。
+
+八、检查访问与备份
+
+curl -i http://127.0.0.1:3155/health
+curl -I http://127.0.0.1:3155/admin
+
+/health 返回 200 表示服务在线；未登录访问 /admin 返回 302 跳转到 /login 是正常行为。
+公网访问超时时，检查服务器防火墙和云服务器安全组是否允许 TCP 3155。
+登录状态过期或容器重启后，重新登录即可；签到计划及每日结果保存在数据库中。
+手机页面已适配：二维码和说明上下排列，时间及日期分行显示，后台任务按卡片展示。
+
+升级或重要配置修改前，可停止容器后复制 bjmf-web-data 文件夹作为数据库备份。
+只运行一个 Web 容器进程，避免多份调度器重复签到。
+
+九、提交签到任务时提示“任务不存在”
+
+1. 先重新构建并启动新版容器，再刷新浏览器页面，登录网站。旧容器仅重启不会载入新版。
+2. 有旧任务时，到管理后台搜索姓名和班级。找到任务就点“详情 / 日志”编辑并保存。
+3. 如果保存时提示原任务已不存在，通常是页面仍持有已删除任务的编号。新版会保留当前填写的内容并清除旧编号。核对后再次点“提交签到任务”。
+4. 如果提示扫码已过期或账号不匹配，点击“生成二维码”，用原学生微信重新扫码。若相同姓名和班级有多条任务，请在后台先确认要改哪一条。
+5. 如果升级后后台所有旧任务都消失了，先检查数据库挂载。不要反复新建任务：
+
+docker inspect --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' bjmf-web
+docker logs --tail=100 bjmf-web
+
+容器路径 /app/web_signin/db 应指向存有原 web_signin.db 的宿主机目录，例如 /opt/AutoSignBJMF/bjmf-web-data。若挂错目录，按第四或第五部分重新使用正确的数据目录。
+
+首次扫码后能看到班级码，但还没保存过任务，表示账号已经绑定。填写经纬度、签到时段和通知方式后，首次点击“提交签到任务”即可创建任务。保存后可到管理后台确认。
+
+十、从 GitHub 在线更新（已有 docker run 容器）
+
+在服务器 SSH 终端执行。已有 docker.env 时可跳过第二部分。如果没有，请先按第二部分填入管理员配置。
+
+cd /opt/AutoSignBJMF &&
+curl -fL https://raw.githubusercontent.com/beiyaoo/AutoSignBJMF/feat/admin-running-tasks/update-server.sh -o update-server.sh &&
+bash update-server.sh
+
+脚本从 GitHub 下载新版源码，先构建镜像，再停止旧容器备份数据库。新版健康检查通过后留下旧容器和数据库快照。新版启动或健康检查失败时，脚本会尝试恢复旧容器。
+直接使用脚本时，默认项目目录为 /opt/AutoSignBJMF，容器名为 bjmf-web。可通过 BJMF_UPDATE_ROOT、BJMF_UPDATE_REPOSITORY、BJMF_UPDATE_REF 和 BJMF_UPDATE_ENV_FILE 覆盖相应设置。
+已使用 Docker Compose 的部署请继续使用第七部分，避免容器脱离原 Compose 项目。
